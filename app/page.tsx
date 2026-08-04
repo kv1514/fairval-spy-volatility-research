@@ -1,352 +1,546 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  calculateBlackScholes,
+  daysToExpiration,
+  valueForType,
+  type ModelInputs,
+  type OptionType,
+} from "./lib/pricing";
 
-type Inputs = {
-  spot: number;
+type Contract = {
+  symbol: string;
+  type: OptionType;
   strike: number;
-  days: number;
-  volatility: number;
-  rate: number;
-  dividend: number;
-  multiplier: number;
+  bid: number;
+  ask: number;
+  last: number;
+  volume: number;
+  openInterest: number;
+  iv: number | null;
+  root: string;
 };
 
-type InputKey = keyof Inputs;
+type MarketRow = { strike: number; call: Contract | null; put: Contract | null };
 
-const DEFAULTS: Inputs = {
-  spot: 187.42,
-  strike: 190,
-  days: 32,
-  volatility: 28.5,
-  rate: 4.35,
-  dividend: 0.52,
-  multiplier: 100,
+type MarketData = {
+  source: "tradier" | "demo";
+  status: "live" | "simulated";
+  symbol: string;
+  name: string;
+  spot: number;
+  change: number;
+  changePercent: number;
+  asOf: string;
+  expirations: string[];
+  expiration: string;
+  rows: MarketRow[];
+  notice?: string;
 };
 
-const fieldGroups: Array<{
-  title: string;
-  fields: Array<{
-    key: InputKey;
-    label: string;
-    suffix: string;
-    step: string;
-    min: string;
-    max?: string;
-  }>;
-}> = [
-  {
-    title: "Contract",
-    fields: [
-      { key: "spot", label: "Underlying price", suffix: "$", step: "0.01", min: "0.01" },
-      { key: "strike", label: "Strike price", suffix: "$", step: "0.50", min: "0.01" },
-      { key: "days", label: "Days to expiration", suffix: "days", step: "1", min: "1", max: "3650" },
-    ],
-  },
-  {
-    title: "Market assumptions",
-    fields: [
-      { key: "volatility", label: "Implied volatility", suffix: "%", step: "0.10", min: "0.01", max: "500" },
-      { key: "rate", label: "Risk-free rate", suffix: "%", step: "0.05", min: "-20", max: "100" },
-      { key: "dividend", label: "Dividend yield", suffix: "%", step: "0.05", min: "0", max: "100" },
-    ],
-  },
-];
+const SYMBOLS = ["SPY", "SPX", "QQQ"] as const;
+const defaultsBySymbol: Record<string, { dividend: number }> = {
+  SPY: { dividend: 1.15 },
+  SPX: { dividend: 1.25 },
+  QQQ: { dividend: 0.55 },
+};
 
-const normalPdf = (x: number) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
-
-function normalCdf(x: number) {
-  const sign = x < 0 ? -1 : 1;
-  const absolute = Math.abs(x) / Math.sqrt(2);
-  const t = 1 / (1 + 0.3275911 * absolute);
-  const erf =
-    1 -
-    (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t +
-      0.254829592) *
-      t *
-      Math.exp(-absolute * absolute));
-  return 0.5 * (1 + sign * erf);
-}
-
-function calculateBlackScholes(input: Inputs) {
-  const S = input.spot;
-  const K = input.strike;
-  const T = input.days / 365;
-  const sigma = input.volatility / 100;
-  const r = input.rate / 100;
-  const q = input.dividend / 100;
-  const sqrtT = Math.sqrt(T);
-  const discountR = Math.exp(-r * T);
-  const discountQ = Math.exp(-q * T);
-  const d1 = (Math.log(S / K) + (r - q + (sigma * sigma) / 2) * T) / (sigma * sqrtT);
-  const d2 = d1 - sigma * sqrtT;
-  const nD1 = normalCdf(d1);
-  const nD2 = normalCdf(d2);
-  const pdfD1 = normalPdf(d1);
-
-  const call = S * discountQ * nD1 - K * discountR * nD2;
-  const put = K * discountR * normalCdf(-d2) - S * discountQ * normalCdf(-d1);
-  const gamma = (discountQ * pdfD1) / (S * sigma * sqrtT);
-  const vega = (S * discountQ * pdfD1 * sqrtT) / 100;
-  const callTheta =
-    (-(S * discountQ * pdfD1 * sigma) / (2 * sqrtT) -
-      r * K * discountR * nD2 +
-      q * S * discountQ * nD1) /
-    365;
-  const putTheta =
-    (-(S * discountQ * pdfD1 * sigma) / (2 * sqrtT) +
-      r * K * discountR * normalCdf(-d2) -
-      q * S * discountQ * normalCdf(-d1)) /
-    365;
-
-  return {
-    call,
-    put,
-    callDelta: discountQ * nD1,
-    putDelta: discountQ * (nD1 - 1),
-    gamma,
-    vega,
-    callTheta,
-    putTheta,
-    callRho: (K * T * discountR * nD2) / 100,
-    putRho: (-K * T * discountR * normalCdf(-d2)) / 100,
-    callIntrinsic: Math.max(S - K, 0),
-    putIntrinsic: Math.max(K - S, 0),
-    callProbability: nD2,
-    putProbability: normalCdf(-d2),
-  };
-}
-
-const currency = new Intl.NumberFormat("en-US", {
+const money = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
 
-const signed = (value: number, digits = 4) => `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
+const number = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+const integer = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+
+function midpoint(contract: Contract) {
+  if (contract.bid > 0 && contract.ask > 0) return (contract.bid + contract.ask) / 2;
+  return contract.last;
+}
+
+function signed(value: number, digits = 2) {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
+}
+
+function dateLabel(value: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(`${value}T12:00:00Z`));
+}
+
+function timeLabel(value: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  }).format(new Date(value));
+}
 
 export default function Home() {
-  const [inputs, setInputs] = useState<Inputs>(DEFAULTS);
+  const [symbol, setSymbol] = useState<(typeof SYMBOLS)[number]>("SPY");
+  const [optionType, setOptionType] = useState<OptionType>("call");
+  const [expiration, setExpiration] = useState("");
+  const [market, setMarket] = useState<MarketData | null>(null);
+  const [selectedSymbol, setSelectedSymbol] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [marketError, setMarketError] = useState("");
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [tokenDraft, setTokenDraft] = useState("");
+  const [liveToken, setLiveToken] = useState("");
+  const [ivMode, setIvMode] = useState<"market" | "manual">("market");
+  const [inputs, setInputs] = useState<ModelInputs>({
+    spot: 741.82,
+    strike: 742,
+    days: 1,
+    volatility: 18.4,
+    rate: 4.35,
+    dividend: defaultsBySymbol.SPY.dividend,
+  });
 
-  const error = useMemo(() => {
-    if (!Number.isFinite(inputs.spot) || inputs.spot <= 0) return "Underlying price must be greater than zero.";
-    if (!Number.isFinite(inputs.strike) || inputs.strike <= 0) return "Strike price must be greater than zero.";
-    if (!Number.isFinite(inputs.days) || inputs.days < 1) return "Enter at least one day to expiration.";
-    if (!Number.isFinite(inputs.volatility) || inputs.volatility <= 0) return "Volatility must be greater than zero.";
-    if (!Number.isFinite(inputs.multiplier) || inputs.multiplier < 1) return "Contract multiplier must be at least one.";
-    if (inputs.dividend < 0) return "Dividend yield cannot be negative.";
-    return "";
-  }, [inputs]);
+  useEffect(() => {
+    const saved = sessionStorage.getItem("tradier-session-token") ?? "";
+    if (saved) {
+      setLiveToken(saved);
+      setTokenDraft(saved);
+    }
+  }, []);
 
-  const result = useMemo(() => (error ? null : calculateBlackScholes(inputs)), [inputs, error]);
-  const moneyness = ((inputs.spot - inputs.strike) / inputs.strike) * 100;
-  const moneynessLabel = Math.abs(moneyness) < 0.5 ? "NEAR THE MONEY" : moneyness > 0 ? "ABOVE STRIKE" : "BELOW STRIKE";
+  const loadMarket = useCallback(async () => {
+    setLoading(true);
+    setMarketError("");
+    try {
+      const query = new URLSearchParams({ symbol });
+      if (expiration) query.set("expiration", expiration);
+      const response = await fetch(`/api/market?${query.toString()}`, {
+        cache: "no-store",
+        headers: liveToken ? { "x-tradier-token": liveToken } : {},
+      });
+      const payload = (await response.json()) as MarketData & { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Market data could not be loaded.");
+      setMarket(payload);
+      if (payload.expiration !== expiration) setExpiration(payload.expiration);
+    } catch (error) {
+      setMarketError(error instanceof Error ? error.message : "Market data could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
+  }, [expiration, liveToken, symbol]);
 
-  const update = (key: InputKey, value: string) => {
-    setInputs((current) => ({ ...current, [key]: value === "" ? 0 : Number(value) }));
+  useEffect(() => {
+    void loadMarket();
+  }, [loadMarket]);
+
+  useEffect(() => {
+    if (market?.status !== "live") return;
+    const timer = window.setInterval(() => void loadMarket(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [loadMarket, market?.status]);
+
+  const contracts = useMemo(
+    () =>
+      (market?.rows ?? [])
+        .map((row) => row[optionType])
+        .filter((contract): contract is Contract => contract !== null),
+    [market, optionType],
+  );
+
+  useEffect(() => {
+    if (!contracts.length || !market) return;
+    const existing = contracts.find((contract) => contract.symbol === selectedSymbol);
+    if (existing) return;
+    const nearest = [...contracts].sort(
+      (a, b) => Math.abs(a.strike - market.spot) - Math.abs(b.strike - market.spot),
+    )[0];
+    setSelectedSymbol(nearest.symbol);
+  }, [contracts, market, selectedSymbol]);
+
+  const selected = useMemo(
+    () => contracts.find((contract) => contract.symbol === selectedSymbol) ?? contracts[0] ?? null,
+    [contracts, selectedSymbol],
+  );
+
+  useEffect(() => {
+    if (!selected || !market) return;
+    setInputs((current) => ({
+      ...current,
+      spot: market.spot,
+      strike: selected.strike,
+      days: daysToExpiration(market.expiration),
+      volatility: ivMode === "market" && selected.iv ? selected.iv : current.volatility,
+    }));
+  }, [ivMode, market?.asOf, market?.expiration, market?.spot, selected?.symbol, selected?.iv]);
+
+  const result = useMemo(() => calculateBlackScholes(inputs), [inputs]);
+  const fairValue = valueForType(result, optionType);
+  const marketMid = selected ? midpoint(selected) : 0;
+  const difference = fairValue - marketMid;
+  const differencePercent = marketMid > 0 ? (difference / marketMid) * 100 : 0;
+  const spread = selected ? Math.max(selected.ask - selected.bid, 0) : 0;
+  const selectedDelta = optionType === "call" ? result.callDelta : result.putDelta;
+  const selectedTheta = optionType === "call" ? result.callTheta : result.putTheta;
+  const selectedRho = optionType === "call" ? result.callRho : result.putRho;
+  const probability = optionType === "call" ? result.callProbability : result.putProbability;
+
+  const chooseUnderlying = (next: (typeof SYMBOLS)[number]) => {
+    setSymbol(next);
+    setExpiration("");
+    setSelectedSymbol("");
+    setInputs((current) => ({ ...current, dividend: defaultsBySymbol[next].dividend }));
+  };
+
+  const chooseType = (type: OptionType) => {
+    setOptionType(type);
+    setSelectedSymbol("");
+  };
+
+  const connect = () => {
+    const token = tokenDraft.trim();
+    if (token.length < 12) {
+      setMarketError("Enter a valid Tradier production token.");
+      return;
+    }
+    sessionStorage.setItem("tradier-session-token", token);
+    setLiveToken(token);
+    setExpiration("");
+    setConnectOpen(false);
+  };
+
+  const disconnect = () => {
+    sessionStorage.removeItem("tradier-session-token");
+    setLiveToken("");
+    setTokenDraft("");
+    setExpiration("");
+    setMarketError("");
+    setConnectOpen(false);
   };
 
   return (
-    <main>
+    <main id="top">
       <header className="site-header">
         <a className="brand" href="#top" aria-label="BlackScholes Lab home">
           <span className="brand-mark" aria-hidden="true">ƒ</span>
-          <span>BlackScholes<span className="brand-muted"> Lab</span></span>
+          <span>BlackScholes <span className="brand-muted">Lab</span></span>
         </a>
-        <div className="header-meta">
-          <span className="live-dot" aria-hidden="true" />
-          <span>LIVE CALCULATION</span>
-          <span className="header-rule" aria-hidden="true" />
-          <span>EUROPEAN OPTIONS</span>
+        <div className="header-actions">
+          <div className={`feed-status ${market?.status === "live" ? "is-live" : ""}`}>
+            <span className="status-dot" aria-hidden="true" />
+            <span>{market?.status === "live" ? "LIVE FEED" : "DEMO FEED"}</span>
+          </div>
+          <button className="connect-button" type="button" onClick={() => setConnectOpen(true)}>
+            {market?.status === "live" ? "Data settings" : "Connect live data"}
+          </button>
         </div>
       </header>
 
-      <section className="hero" id="top">
-        <div>
-          <p className="eyebrow">OPTIONS PRICING WORKBENCH</p>
-          <h1>Price the contract.<br /><span>Know the risk.</span></h1>
+      <section className="market-hero">
+        <div className="hero-copy-block">
+          <p className="eyebrow">LIVE OPTIONS WORKBENCH</p>
+          <h1>Market price,<br /><span>meet model value.</span></h1>
+          <p className="hero-copy">
+            Select a live contract, load its market assumptions, and compare the quoted price with a Black–Scholes theoretical value.
+          </p>
         </div>
-        <p className="hero-copy">
-          Enter your assumptions and get a theoretical fair value for calls and puts—updated instantly with the full Greek profile.
-        </p>
+        <div className="symbol-picker" aria-label="Choose an underlying">
+          {SYMBOLS.map((item) => (
+            <button
+              type="button"
+              key={item}
+              className={item === symbol ? "active" : ""}
+              onClick={() => chooseUnderlying(item)}
+              aria-pressed={item === symbol}
+            >
+              <strong>{item}</strong>
+              <span>{item === "SPX" ? "INDEX" : "ETF"}</span>
+            </button>
+          ))}
+        </div>
       </section>
 
-      <section className="workspace" aria-label="Black-Scholes calculator">
-        <aside className="input-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="section-number">01 / INPUTS</p>
-              <h2>Price assumptions</h2>
-            </div>
-            <button className="reset-button" type="button" onClick={() => setInputs(DEFAULTS)}>Reset</button>
-          </div>
-
-          {fieldGroups.map((group) => (
-            <fieldset key={group.title}>
-              <legend>{group.title}</legend>
-              <div className="field-grid">
-                {group.fields.map((field) => (
-                  <label className="field" key={field.key} htmlFor={field.key}>
-                    <span className="field-label">{field.label}</span>
-                    <span className="input-shell">
-                      {field.suffix === "$" && <span className="input-prefix">$</span>}
-                      <input
-                        id={field.key}
-                        type="number"
-                        inputMode="decimal"
-                        min={field.min}
-                        max={field.max}
-                        step={field.step}
-                        value={inputs[field.key]}
-                        onChange={(event) => update(field.key, event.target.value)}
-                        className={field.suffix === "$" ? "has-prefix" : ""}
-                      />
-                      {field.suffix !== "$" && <span className="input-suffix">{field.suffix}</span>}
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-          ))}
-
-          <div className="multiplier-row">
-            <label htmlFor="multiplier">
-              <span className="field-label">Contract multiplier</span>
-              <span className="field-help">Standard U.S. equity option = 100 shares</span>
-            </label>
-            <span className="input-shell compact-input">
-              <input
-                id="multiplier"
-                type="number"
-                inputMode="numeric"
-                min="1"
-                step="1"
-                value={inputs.multiplier}
-                onChange={(event) => update("multiplier", event.target.value)}
-              />
-              <span className="input-suffix">shares</span>
+      <section className="ticker-strip" aria-live="polite">
+        <div className="ticker-identity">
+          <strong>{symbol}</strong>
+          <span>{market?.name ?? "Loading market…"}</span>
+        </div>
+        <div className="ticker-price">
+          <strong>{market ? money.format(market.spot) : "—"}</strong>
+          {market && (
+            <span className={market.change >= 0 ? "positive" : "negative"}>
+              {signed(market.change)} ({signed(market.changePercent)}%)
             </span>
+          )}
+        </div>
+        <div className="ticker-clock">
+          <span>{market?.status === "live" ? "LATEST QUOTE" : "ILLUSTRATIVE SNAPSHOT"}</span>
+          <strong>{market ? timeLabel(market.asOf) : "Connecting…"}</strong>
+        </div>
+      </section>
+
+      {marketError && (
+        <div className="error-banner" role="alert">
+          <span>!</span><p>{marketError}</p>
+          <button type="button" onClick={() => setConnectOpen(true)}>Check connection</button>
+        </div>
+      )}
+
+      {market?.status === "simulated" && (
+        <div className="demo-banner">
+          <div>
+            <strong>Demo market is active</strong>
+            <span>{market.notice}</span>
+          </div>
+          <button type="button" onClick={() => setConnectOpen(true)}>Connect Tradier</button>
+        </div>
+      )}
+
+      <section className="terminal-shell">
+        <section className="chain-panel" aria-label={`${symbol} option chain`}>
+          <div className="panel-topline">
+            <div>
+              <p className="section-number">01 / OPTION CHAIN</p>
+              <h2>Choose a contract</h2>
+            </div>
+            <button className="refresh-button" type="button" onClick={() => void loadMarket()} disabled={loading}>
+              <span className={loading ? "spin" : ""}>↻</span> {loading ? "Updating" : "Refresh"}
+            </button>
           </div>
 
-          <div className={`model-status ${error ? "status-error" : ""}`} role="status" aria-live="polite">
-            <span aria-hidden="true">{error ? "!" : "✓"}</span>
-            <div>
-              <strong>{error || "Model inputs valid"}</strong>
-              <small>{error ? "Fix the highlighted assumption to calculate." : "Continuous compounding · 365-day year"}</small>
+          <div className="chain-controls">
+            <label>
+              <span>EXPIRATION</span>
+              <select
+                value={expiration}
+                onChange={(event) => {
+                  setExpiration(event.target.value);
+                  setSelectedSymbol("");
+                }}
+                disabled={!market?.expirations.length}
+              >
+                {(market?.expirations ?? []).map((date) => (
+                  <option key={date} value={date}>{dateLabel(date)} · {date}</option>
+                ))}
+              </select>
+            </label>
+            <div className="type-toggle" role="group" aria-label="Option type">
+              <button type="button" className={optionType === "call" ? "active call" : ""} onClick={() => chooseType("call")}>Calls</button>
+              <button type="button" className={optionType === "put" ? "active put" : ""} onClick={() => chooseType("put")}>Puts</button>
             </div>
           </div>
-        </aside>
 
-        <section className="results-panel" aria-live="polite" aria-atomic="true">
-          <div className="results-heading">
+          <div className="chain-table-wrap">
+            <table className="chain-table">
+              <thead>
+                <tr>
+                  <th>Strike</th>
+                  <th>Bid</th>
+                  <th>Ask</th>
+                  <th>Mid</th>
+                  <th>IV</th>
+                  <th>Volume</th>
+                  <th>Open int.</th>
+                  <th>Model</th>
+                </tr>
+              </thead>
+              <tbody>
+                {contracts.map((contract) => {
+                  const iv = contract.iv ?? inputs.volatility;
+                  const model = calculateBlackScholes({
+                    spot: market?.spot ?? inputs.spot,
+                    strike: contract.strike,
+                    days: market ? daysToExpiration(market.expiration) : inputs.days,
+                    volatility: iv,
+                    rate: inputs.rate,
+                    dividend: inputs.dividend,
+                  });
+                  const rowFair = valueForType(model, optionType);
+                  const isSelected = contract.symbol === selected?.symbol;
+                  return (
+                    <tr
+                      key={contract.symbol}
+                      className={isSelected ? "selected" : ""}
+                      onClick={() => setSelectedSymbol(contract.symbol)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") setSelectedSymbol(contract.symbol);
+                      }}
+                      tabIndex={0}
+                      aria-selected={isSelected}
+                    >
+                      <td><strong>{number.format(contract.strike)}</strong>{Math.abs(contract.strike - (market?.spot ?? 0)) < 0.51 && <small>ATM</small>}</td>
+                      <td>{money.format(contract.bid)}</td>
+                      <td>{money.format(contract.ask)}</td>
+                      <td>{money.format(midpoint(contract))}</td>
+                      <td>{contract.iv ? `${contract.iv.toFixed(1)}%` : "—"}</td>
+                      <td>{integer.format(contract.volume)}</td>
+                      <td>{integer.format(contract.openInterest)}</td>
+                      <td className="model-cell">{money.format(rowFair)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {!contracts.length && !loading && <div className="table-empty">No contracts returned for this expiration.</div>}
+            {loading && !market && <div className="table-empty">Loading the option chain…</div>}
+          </div>
+          <p className="table-note">Click a row to load it into the model. Live connections refresh every 15 seconds.</p>
+        </section>
+
+        <aside className="analysis-panel" aria-label="Selected contract analysis">
+          <div className="panel-topline analysis-heading">
             <div>
-              <p className="section-number">02 / FAIR VALUE</p>
-              <h2>Theoretical prices</h2>
+              <p className="section-number">02 / MODEL VALUE</p>
+              <h2>{optionType.toUpperCase()} · {selected ? number.format(selected.strike) : "—"}</h2>
             </div>
-            {!error && (
-              <div className="moneyness">
-                <span>{moneynessLabel}</span>
-                <strong>{signed(moneyness, 2)}%</strong>
-              </div>
-            )}
+            <span className={`option-badge ${optionType}`}>{optionType[0].toUpperCase()}</span>
           </div>
 
-          {result ? (
-            <>
-              <div className="price-grid">
-                <article className="price-card call-card">
-                  <div className="option-label">
-                    <span className="option-icon">C</span>
-                    <div><p>CALL OPTION</p><small>RIGHT TO BUY</small></div>
-                  </div>
-                  <div className="primary-price">
-                    <span>Fair value / share</span>
-                    <strong>{currency.format(result.call)}</strong>
-                  </div>
-                  <div className="contract-price">
-                    <span>CONTRACT VALUE</span>
-                    <strong>{currency.format(result.call * inputs.multiplier)}</strong>
-                  </div>
-                  <dl className="value-breakdown">
-                    <div><dt>Intrinsic value</dt><dd>{currency.format(result.callIntrinsic)}</dd></div>
-                    <div><dt>Time value</dt><dd>{currency.format(Math.max(result.call - result.callIntrinsic, 0))}</dd></div>
-                    <div><dt>Break-even at expiry</dt><dd>{currency.format(inputs.strike + result.call)}</dd></div>
-                  </dl>
-                </article>
+          <div className="fair-value-block">
+            <span>BLACK–SCHOLES FAIR VALUE</span>
+            <strong>{selected ? money.format(fairValue) : "—"}</strong>
+            <small>{selected ? `${money.format(fairValue * 100)} per 100-share contract` : "Select a contract"}</small>
+          </div>
 
-                <article className="price-card put-card">
-                  <div className="option-label">
-                    <span className="option-icon">P</span>
-                    <div><p>PUT OPTION</p><small>RIGHT TO SELL</small></div>
-                  </div>
-                  <div className="primary-price">
-                    <span>Fair value / share</span>
-                    <strong>{currency.format(result.put)}</strong>
-                  </div>
-                  <div className="contract-price">
-                    <span>CONTRACT VALUE</span>
-                    <strong>{currency.format(result.put * inputs.multiplier)}</strong>
-                  </div>
-                  <dl className="value-breakdown">
-                    <div><dt>Intrinsic value</dt><dd>{currency.format(result.putIntrinsic)}</dd></div>
-                    <div><dt>Time value</dt><dd>{currency.format(Math.max(result.put - result.putIntrinsic, 0))}</dd></div>
-                    <div><dt>Break-even at expiry</dt><dd>{currency.format(inputs.strike - result.put)}</dd></div>
-                  </dl>
-                </article>
+          {selected && (
+            <div className="comparison-block">
+              <div className="comparison-copy">
+                <span>VS MARKET MIDPOINT</span>
+                <strong className={difference >= 0 ? "positive" : "negative"}>
+                  {signed(differencePercent)}%
+                </strong>
               </div>
-
-              <div className="greeks-section">
-                <div className="greeks-title">
-                  <div><p className="section-number">03 / SENSITIVITIES</p><h3>Greeks at a glance</h3></div>
-                  <p>Per share · Theta per day · Vega/Rho per 1 point</p>
-                </div>
-                <div className="greeks-table" role="table" aria-label="Option Greeks">
-                  <div className="greeks-row greeks-header" role="row">
-                    <span role="columnheader">GREEK</span><span role="columnheader">CALL</span><span role="columnheader">PUT</span><span role="columnheader">MEASURES</span>
-                  </div>
-                  <GreekRow name="Delta" call={signed(result.callDelta)} put={signed(result.putDelta)} description="Price sensitivity" />
-                  <GreekRow name="Gamma" call={result.gamma.toFixed(4)} put={result.gamma.toFixed(4)} description="Delta acceleration" />
-                  <GreekRow name="Theta" call={signed(result.callTheta)} put={signed(result.putTheta)} description="Daily time decay" />
-                  <GreekRow name="Vega" call={signed(result.vega)} put={signed(result.vega)} description="Volatility sensitivity" />
-                  <GreekRow name="Rho" call={signed(result.callRho)} put={signed(result.putRho)} description="Rate sensitivity" />
-                </div>
+              <div className="comparison-track" aria-hidden="true">
+                <span className="market-marker" style={{ left: "50%" }} />
+                <span
+                  className="model-marker"
+                  style={{ left: `${Math.max(4, Math.min(96, 50 + differencePercent * 2))}%` }}
+                />
               </div>
-
-              <div className="model-notes">
-                <div><span>CALL P(ITM)</span><strong>{(result.callProbability * 100).toFixed(1)}%</strong></div>
-                <div><span>PUT P(ITM)</span><strong>{(result.putProbability * 100).toFixed(1)}%</strong></div>
-                <p>Risk-neutral probabilities based on the model’s inputs—not a market forecast.</p>
-              </div>
-            </>
-          ) : (
-            <div className="empty-result">
-              <span aria-hidden="true">ƒ</span>
-              <h3>Waiting for valid inputs</h3>
-              <p>Correct the assumption on the left and both option values will update here.</p>
+              <p>
+                Model is <strong>{money.format(Math.abs(difference))}</strong> {difference >= 0 ? "above" : "below"} the quoted midpoint.
+                This is a model comparison, not a trade recommendation.
+              </p>
             </div>
           )}
-        </section>
+
+          <div className="quote-grid">
+            <div><span>BID</span><strong>{selected ? money.format(selected.bid) : "—"}</strong></div>
+            <div><span>ASK</span><strong>{selected ? money.format(selected.ask) : "—"}</strong></div>
+            <div><span>MID</span><strong>{selected ? money.format(marketMid) : "—"}</strong></div>
+            <div><span>SPREAD</span><strong>{selected ? money.format(spread) : "—"}</strong></div>
+          </div>
+
+          <div className="model-controls">
+            <div className="control-heading">
+              <div><p className="section-number">03 / ASSUMPTIONS</p><h3>Model inputs</h3></div>
+              <div className="iv-mode" role="group" aria-label="Volatility source">
+                <button type="button" className={ivMode === "market" ? "active" : ""} onClick={() => setIvMode("market")}>Market IV</button>
+                <button type="button" className={ivMode === "manual" ? "active" : ""} onClick={() => setIvMode("manual")}>Manual</button>
+              </div>
+            </div>
+            <div className="input-grid">
+              <ModelInput label="Spot" value={inputs.spot} suffix="$" step="0.01" onChange={(spot) => setInputs((current) => ({ ...current, spot }))} />
+              <ModelInput label="Strike" value={inputs.strike} suffix="$" step="0.5" onChange={(strike) => setInputs((current) => ({ ...current, strike }))} />
+              <ModelInput label="Days" value={Number(inputs.days.toFixed(3))} suffix="d" step="0.01" onChange={(days) => setInputs((current) => ({ ...current, days: Math.max(days, 0.01) }))} />
+              <ModelInput label="Volatility" value={Number(inputs.volatility.toFixed(2))} suffix="%" step="0.1" disabled={ivMode === "market"} onChange={(volatility) => setInputs((current) => ({ ...current, volatility: Math.max(volatility, 0.01) }))} />
+              <ModelInput label="Risk-free rate" value={inputs.rate} suffix="%" step="0.05" onChange={(rate) => setInputs((current) => ({ ...current, rate }))} />
+              <ModelInput label="Dividend yield" value={inputs.dividend} suffix="%" step="0.05" onChange={(dividend) => setInputs((current) => ({ ...current, dividend: Math.max(dividend, 0) }))} />
+            </div>
+          </div>
+
+          <div className="greeks-block">
+            <div><span>DELTA</span><strong>{signed(selectedDelta, 4)}</strong></div>
+            <div><span>GAMMA</span><strong>{result.gamma.toFixed(4)}</strong></div>
+            <div><span>THETA / DAY</span><strong>{signed(selectedTheta, 4)}</strong></div>
+            <div><span>VEGA / PT</span><strong>{signed(result.vega, 4)}</strong></div>
+            <div><span>RHO / PT</span><strong>{signed(selectedRho, 4)}</strong></div>
+            <div><span>MODEL P(ITM)</span><strong>{(probability * 100).toFixed(1)}%</strong></div>
+          </div>
+        </aside>
+      </section>
+
+      <section className="methodology">
+        <p className="section-number">04 / READ THE NUMBER CORRECTLY</p>
+        <div className="method-grid">
+          <div><span>01</span><strong>Market data enters</strong><p>Spot, strike, expiration, bid, ask, and volatility are loaded from the selected chain.</p></div>
+          <div><span>02</span><strong>The model recalculates</strong><p>Change volatility, rates, or dividends to test your own view without changing the quote.</p></div>
+          <div><span>03</span><strong>Compare—not predict</strong><p>The difference is a theoretical model gap. Liquidity, exercise style, and execution still matter.</p></div>
+        </div>
       </section>
 
       <footer>
         <div>
-          <strong>Model assumptions</strong>
-          <p>European-style exercise, constant volatility and rates, lognormal returns, continuous dividends, and no transaction costs.</p>
+          <strong>BlackScholes Lab</strong>
+          <p>European-style Black–Scholes with continuous dividends. SPY and QQQ are American-style contracts, so model values are approximations.</p>
         </div>
-        <p className="disclaimer">EDUCATIONAL TOOL · NOT INVESTMENT ADVICE</p>
+        <p className="disclaimer">EDUCATIONAL ANALYTICS · NOT INVESTMENT ADVICE</p>
       </footer>
+
+      {connectOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setConnectOpen(false); }}>
+          <section className="connect-modal" role="dialog" aria-modal="true" aria-labelledby="connect-title">
+            <button className="modal-close" type="button" aria-label="Close" onClick={() => setConnectOpen(false)}>×</button>
+            <p className="section-number">LIVE MARKET CONNECTION</p>
+            <h2 id="connect-title">Connect Tradier</h2>
+            <p className="modal-copy">
+              A Tradier production token unlocks live SPY, SPX, and QQQ option chains. The token stays in this browser session and is never saved by the site.
+            </p>
+            <label className="token-field">
+              <span>PRODUCTION TOKEN</span>
+              <input
+                type="password"
+                value={tokenDraft}
+                onChange={(event) => setTokenDraft(event.target.value)}
+                placeholder="Paste token"
+                autoComplete="off"
+              />
+            </label>
+            <div className="modal-actions">
+              <button className="primary-action" type="button" onClick={connect}>Connect live feed</button>
+              {liveToken && <button className="text-action" type="button" onClick={disconnect}>Disconnect</button>}
+            </div>
+            <p className="modal-footnote">
+              No account yet? <a href="https://docs.tradier.com/docs/getting-started" target="_blank" rel="noreferrer">See Tradier setup</a>. Until connected, the site remains fully usable with clearly labeled simulated data.
+            </p>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
 
-function GreekRow({ name, call, put, description }: { name: string; call: string; put: string; description: string }) {
+function ModelInput({
+  label,
+  value,
+  suffix,
+  step,
+  disabled = false,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  suffix: string;
+  step: string;
+  disabled?: boolean;
+  onChange: (value: number) => void;
+}) {
   return (
-    <div className="greeks-row" role="row">
-      <strong role="cell">{name}</strong>
-      <span role="cell">{call}</span>
-      <span role="cell">{put}</span>
-      <small role="cell">{description}</small>
-    </div>
+    <label className="model-input">
+      <span>{label}</span>
+      <div>
+        <input
+          type="number"
+          value={value}
+          step={step}
+          disabled={disabled}
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+        <small>{suffix}</small>
+      </div>
+    </label>
   );
 }
