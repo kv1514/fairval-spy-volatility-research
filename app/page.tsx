@@ -16,17 +16,20 @@ type Contract = {
   bid: number;
   ask: number;
   last: number;
-  volume: number;
-  openInterest: number;
+  volume: number | null;
+  openInterest: number | null;
   iv: number | null;
   root: string;
+  quoteTime: string | null;
+  settlementMinutes: number;
 };
 
 type MarketRow = { strike: number; call: Contract | null; put: Contract | null };
 
 type MarketData = {
-  source: "tradier" | "demo";
-  status: "live" | "simulated";
+  source: "alpaca" | "tradier";
+  status: "live" | "indicative";
+  feed: string;
   symbol: string;
   name: string;
   spot: number;
@@ -37,6 +40,22 @@ type MarketData = {
   expiration: string;
   rows: MarketRow[];
   notice?: string;
+};
+
+type DataConnection = {
+  provider: "alpaca" | "tradier";
+  alpacaKeyId: string;
+  alpacaSecretKey: string;
+  alpacaFeed: "indicative" | "opra";
+  tradierToken: string;
+};
+
+const EMPTY_CONNECTION: DataConnection = {
+  provider: "alpaca",
+  alpacaKeyId: "",
+  alpacaSecretKey: "",
+  alpacaFeed: "indicative",
+  tradierToken: "",
 };
 
 const SYMBOLS = ["SPY", "SPX", "QQQ"] as const;
@@ -54,10 +73,10 @@ const money = new Intl.NumberFormat("en-US", {
 });
 
 const number = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
-const integer = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
-
 function midpoint(contract: Contract) {
-  if (contract.bid > 0 && contract.ask > 0) return (contract.bid + contract.ask) / 2;
+  if (contract.bid >= 0 && contract.ask > 0 && contract.ask >= contract.bid) {
+    return (contract.bid + contract.ask) / 2;
+  }
   return contract.last;
 }
 
@@ -89,59 +108,82 @@ export default function Home() {
   const [expiration, setExpiration] = useState("");
   const [market, setMarket] = useState<MarketData | null>(null);
   const [selectedSymbol, setSelectedSymbol] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [marketError, setMarketError] = useState("");
   const [connectOpen, setConnectOpen] = useState(false);
-  const [tokenDraft, setTokenDraft] = useState("");
-  const [liveToken, setLiveToken] = useState("");
+  const [connectionReady, setConnectionReady] = useState(false);
+  const [connection, setConnection] = useState<DataConnection>(EMPTY_CONNECTION);
+  const [connectionDraft, setConnectionDraft] = useState<DataConnection>(EMPTY_CONNECTION);
   const [ivMode, setIvMode] = useState<"market" | "manual">("market");
   const [inputs, setInputs] = useState<ModelInputs>({
-    spot: 741.82,
-    strike: 742,
-    days: 1,
-    volatility: 18.4,
+    spot: 0,
+    strike: 0,
+    days: 0.001,
+    volatility: 20,
     rate: 4.35,
     dividend: defaultsBySymbol.SPY.dividend,
   });
 
   useEffect(() => {
-    const saved = sessionStorage.getItem("tradier-session-token") ?? "";
+    const saved = sessionStorage.getItem("market-data-connection");
     if (saved) {
-      setLiveToken(saved);
-      setTokenDraft(saved);
+      try {
+        const parsed = JSON.parse(saved) as Partial<DataConnection>;
+        const restored: DataConnection = {
+          ...EMPTY_CONNECTION,
+          ...parsed,
+          provider: parsed.provider === "tradier" ? "tradier" : "alpaca",
+          alpacaFeed: parsed.alpacaFeed === "opra" ? "opra" : "indicative",
+        };
+        setConnection(restored);
+        setConnectionDraft(restored);
+      } catch {
+        sessionStorage.removeItem("market-data-connection");
+      }
     }
+    setConnectionReady(true);
   }, []);
 
   const loadMarket = useCallback(async () => {
     setLoading(true);
     setMarketError("");
     try {
-      const query = new URLSearchParams({ symbol });
+      const query = new URLSearchParams({ symbol, provider: connection.provider });
       if (expiration) query.set("expiration", expiration);
+      const headers: Record<string, string> = {};
+      if (connection.provider === "alpaca") {
+        if (connection.alpacaKeyId) headers["x-alpaca-key-id"] = connection.alpacaKeyId;
+        if (connection.alpacaSecretKey) headers["x-alpaca-secret-key"] = connection.alpacaSecretKey;
+        headers["x-alpaca-feed"] = connection.alpacaFeed;
+      } else if (connection.tradierToken) {
+        headers["x-tradier-token"] = connection.tradierToken;
+      }
       const response = await fetch(`/api/market?${query.toString()}`, {
         cache: "no-store",
-        headers: liveToken ? { "x-tradier-token": liveToken } : {},
+        headers,
       });
       const payload = (await response.json()) as MarketData & { error?: string };
       if (!response.ok) throw new Error(payload.error || "Market data could not be loaded.");
       setMarket(payload);
       if (payload.expiration !== expiration) setExpiration(payload.expiration);
     } catch (error) {
+      setMarket(null);
       setMarketError(error instanceof Error ? error.message : "Market data could not be loaded.");
     } finally {
       setLoading(false);
     }
-  }, [expiration, liveToken, symbol]);
+  }, [connection, expiration, symbol]);
 
   useEffect(() => {
+    if (!connectionReady) return;
     void loadMarket();
-  }, [loadMarket]);
+  }, [connectionReady, loadMarket]);
 
   useEffect(() => {
-    if (market?.status !== "live") return;
+    if (!market) return;
     const timer = window.setInterval(() => void loadMarket(), 15_000);
     return () => window.clearInterval(timer);
-  }, [loadMarket, market?.status]);
+  }, [loadMarket, market]);
 
   const contracts = useMemo(
     () =>
@@ -172,15 +214,16 @@ export default function Home() {
       ...current,
       spot: market.spot,
       strike: selected.strike,
-      days: daysToExpiration(market.expiration),
-      volatility: ivMode === "market" && selected.iv ? selected.iv : current.volatility,
+      days: daysToExpiration(market.expiration, Date.now(), selected.settlementMinutes),
+      volatility: ivMode === "market" && selected.iv != null ? selected.iv : current.volatility,
     }));
   }, [ivMode, market?.asOf, market?.expiration, market?.spot, selected?.symbol, selected?.iv]);
 
   const result = useMemo(() => calculateBlackScholes(inputs), [inputs]);
-  const fairValue = valueForType(result, optionType);
+  const modelAvailable = Boolean(selected && (ivMode === "manual" || selected.iv != null));
+  const fairValue = modelAvailable ? valueForType(result, optionType) : null;
   const marketMid = selected ? midpoint(selected) : 0;
-  const difference = fairValue - marketMid;
+  const difference = fairValue == null ? 0 : fairValue - marketMid;
   const differencePercent = marketMid > 0 ? (difference / marketMid) * 100 : 0;
   const spread = selected ? Math.max(selected.ask - selected.bid, 0) : 0;
   const selectedDelta = optionType === "call" ? result.callDelta : result.putDelta;
@@ -190,6 +233,7 @@ export default function Home() {
 
   const chooseUnderlying = (next: (typeof SYMBOLS)[number]) => {
     setSymbol(next);
+    setMarket(null);
     setExpiration("");
     setSelectedSymbol("");
     setInputs((current) => ({ ...current, dividend: defaultsBySymbol[next].dividend }));
@@ -201,25 +245,42 @@ export default function Home() {
   };
 
   const connect = () => {
-    const token = tokenDraft.trim();
-    if (token.length < 12) {
+    const next: DataConnection = {
+      ...connectionDraft,
+      alpacaKeyId: connectionDraft.alpacaKeyId.trim(),
+      alpacaSecretKey: connectionDraft.alpacaSecretKey.trim(),
+      tradierToken: connectionDraft.tradierToken.trim(),
+    };
+    if (next.provider === "alpaca" && (!next.alpacaKeyId || !next.alpacaSecretKey)) {
+      setMarketError("Enter both your Alpaca key ID and secret key.");
+      return;
+    }
+    if (next.provider === "tradier" && next.tradierToken.length < 12) {
       setMarketError("Enter a valid Tradier production token.");
       return;
     }
-    sessionStorage.setItem("tradier-session-token", token);
-    setLiveToken(token);
+    sessionStorage.setItem("market-data-connection", JSON.stringify(next));
+    setConnection(next);
     setExpiration("");
+    setSelectedSymbol("");
+    setMarket(null);
+    setMarketError("");
     setConnectOpen(false);
   };
 
   const disconnect = () => {
-    sessionStorage.removeItem("tradier-session-token");
-    setLiveToken("");
-    setTokenDraft("");
+    sessionStorage.removeItem("market-data-connection");
+    setConnection(EMPTY_CONNECTION);
+    setConnectionDraft(EMPTY_CONNECTION);
+    setMarket(null);
     setExpiration("");
     setMarketError("");
     setConnectOpen(false);
   };
+
+  const hasSavedCredentials = Boolean(
+    connection.alpacaKeyId || connection.alpacaSecretKey || connection.tradierToken,
+  );
 
   return (
     <main id="top">
@@ -229,12 +290,12 @@ export default function Home() {
           <span>BlackScholes <span className="brand-muted">Lab</span></span>
         </a>
         <div className="header-actions">
-          <div className={`feed-status ${market?.status === "live" ? "is-live" : ""}`}>
+          <div className={`feed-status ${market?.status === "live" ? "is-live" : market?.status === "indicative" ? "is-indicative" : ""}`}>
             <span className="status-dot" aria-hidden="true" />
-            <span>{market?.status === "live" ? "LIVE FEED" : "DEMO FEED"}</span>
+            <span>{market ? market.feed : "DATA OFFLINE"}</span>
           </div>
           <button className="connect-button" type="button" onClick={() => setConnectOpen(true)}>
-            {market?.status === "live" ? "Data settings" : "Connect live data"}
+            {market ? "Data settings" : "Connect market data"}
           </button>
         </div>
       </header>
@@ -266,7 +327,7 @@ export default function Home() {
       <section className="ticker-strip" aria-live="polite">
         <div className="ticker-identity">
           <strong>{symbol}</strong>
-          <span>{market?.name ?? "Loading market…"}</span>
+          <span>{market?.name ?? "Connect a verified market feed"}</span>
         </div>
         <div className="ticker-price">
           <strong>{market ? money.format(market.spot) : "—"}</strong>
@@ -277,8 +338,8 @@ export default function Home() {
           )}
         </div>
         <div className="ticker-clock">
-          <span>{market?.status === "live" ? "LATEST QUOTE" : "ILLUSTRATIVE SNAPSHOT"}</span>
-          <strong>{market ? timeLabel(market.asOf) : "Connecting…"}</strong>
+          <span>{market ? "LATEST PROVIDER SNAPSHOT" : "NO SAMPLE DATA"}</span>
+          <strong>{market ? timeLabel(market.asOf) : loading ? "Connecting…" : "OFFLINE"}</strong>
         </div>
       </section>
 
@@ -289,13 +350,13 @@ export default function Home() {
         </div>
       )}
 
-      {market?.status === "simulated" && (
+      {market?.status === "indicative" && (
         <div className="demo-banner">
           <div>
-            <strong>Demo market is active</strong>
+            <strong>Indicative data—not OPRA</strong>
             <span>{market.notice}</span>
           </div>
-          <button type="button" onClick={() => setConnectOpen(true)}>Connect Tradier</button>
+          <button type="button" onClick={() => setConnectOpen(true)}>Change feed</button>
         </div>
       )}
 
@@ -342,23 +403,24 @@ export default function Home() {
                   <th>Ask</th>
                   <th>Mid</th>
                   <th>IV</th>
-                  <th>Volume</th>
-                  <th>Open int.</th>
+                  <th>Quote time</th>
                   <th>Model</th>
                 </tr>
               </thead>
               <tbody>
                 {contracts.map((contract) => {
-                  const iv = contract.iv ?? inputs.volatility;
-                  const model = calculateBlackScholes({
-                    spot: market?.spot ?? inputs.spot,
-                    strike: contract.strike,
-                    days: market ? daysToExpiration(market.expiration) : inputs.days,
-                    volatility: iv,
-                    rate: inputs.rate,
-                    dividend: inputs.dividend,
-                  });
-                  const rowFair = valueForType(model, optionType);
+                  const rowFair = contract.iv == null
+                    ? null
+                    : valueForType(calculateBlackScholes({
+                        spot: market?.spot ?? inputs.spot,
+                        strike: contract.strike,
+                        days: market
+                          ? daysToExpiration(market.expiration, Date.now(), contract.settlementMinutes)
+                          : inputs.days,
+                        volatility: contract.iv,
+                        rate: inputs.rate,
+                        dividend: inputs.dividend,
+                      }), optionType);
                   const isSelected = contract.symbol === selected?.symbol;
                   return (
                     <tr
@@ -375,16 +437,21 @@ export default function Home() {
                       <td>{money.format(contract.bid)}</td>
                       <td>{money.format(contract.ask)}</td>
                       <td>{money.format(midpoint(contract))}</td>
-                      <td>{contract.iv ? `${contract.iv.toFixed(1)}%` : "—"}</td>
-                      <td>{integer.format(contract.volume)}</td>
-                      <td>{integer.format(contract.openInterest)}</td>
-                      <td className="model-cell">{money.format(rowFair)}</td>
+                      <td>{contract.iv != null ? `${contract.iv.toFixed(1)}%` : "—"}</td>
+                      <td>{contract.quoteTime ? timeLabel(contract.quoteTime) : "—"}</td>
+                      <td className="model-cell">{rowFair == null ? "—" : money.format(rowFair)}</td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
-            {!contracts.length && !loading && <div className="table-empty">No contracts returned for this expiration.</div>}
+            {!contracts.length && !loading && (
+              <div className="table-empty">
+                <strong>{marketError ? "Market data unavailable" : "Connect a market-data feed"}</strong>
+                <span>No fabricated option prices are shown.</span>
+                <button type="button" onClick={() => setConnectOpen(true)}>Open data settings</button>
+              </div>
+            )}
             {loading && !market && <div className="table-empty">Loading the option chain…</div>}
           </div>
           <p className="table-note">Click a row to load it into the model. Live connections refresh every 15 seconds.</p>
@@ -401,11 +468,11 @@ export default function Home() {
 
           <div className="fair-value-block">
             <span>BLACK–SCHOLES FAIR VALUE</span>
-            <strong>{selected ? money.format(fairValue) : "—"}</strong>
-            <small>{selected ? `${money.format(fairValue * 100)} per 100-share contract` : "Select a contract"}</small>
+            <strong>{fairValue == null ? "—" : money.format(fairValue)}</strong>
+            <small>{fairValue == null ? (selected ? "Market IV unavailable—use Manual IV" : "Select a live contract") : `${money.format(fairValue * 100)} per 100-share contract`}</small>
           </div>
 
-          {selected && (
+          {selected && fairValue != null && (
             <div className="comparison-block">
               <div className="comparison-copy">
                 <span>VS MARKET MIDPOINT</span>
@@ -422,7 +489,7 @@ export default function Home() {
               </div>
               <p>
                 Model is <strong>{money.format(Math.abs(difference))}</strong> {difference >= 0 ? "above" : "below"} the quoted midpoint.
-                This is a model comparison, not a trade recommendation.
+                Robinhood may display a different mark; compare the same contract and timestamp.
               </p>
             </div>
           )}
@@ -443,9 +510,9 @@ export default function Home() {
               </div>
             </div>
             <div className="input-grid">
-              <ModelInput label="Spot" value={inputs.spot} suffix="$" step="0.01" onChange={(spot) => setInputs((current) => ({ ...current, spot }))} />
-              <ModelInput label="Strike" value={inputs.strike} suffix="$" step="0.5" onChange={(strike) => setInputs((current) => ({ ...current, strike }))} />
-              <ModelInput label="Days" value={Number(inputs.days.toFixed(3))} suffix="d" step="0.01" onChange={(days) => setInputs((current) => ({ ...current, days: Math.max(days, 0.01) }))} />
+              <ModelInput label="Spot" value={inputs.spot} suffix="$" step="0.01" disabled={ivMode === "market"} onChange={(spot) => setInputs((current) => ({ ...current, spot }))} />
+              <ModelInput label="Strike" value={inputs.strike} suffix="$" step="0.5" disabled={ivMode === "market"} onChange={(strike) => setInputs((current) => ({ ...current, strike }))} />
+              <ModelInput label="Days" value={Number(inputs.days.toFixed(4))} suffix="d" step="0.001" disabled={ivMode === "market"} onChange={(days) => setInputs((current) => ({ ...current, days: Math.max(days, 0.001) }))} />
               <ModelInput label="Volatility" value={Number(inputs.volatility.toFixed(2))} suffix="%" step="0.1" disabled={ivMode === "market"} onChange={(volatility) => setInputs((current) => ({ ...current, volatility: Math.max(volatility, 0.01) }))} />
               <ModelInput label="Risk-free rate" value={inputs.rate} suffix="%" step="0.05" onChange={(rate) => setInputs((current) => ({ ...current, rate }))} />
               <ModelInput label="Dividend yield" value={inputs.dividend} suffix="%" step="0.05" onChange={(dividend) => setInputs((current) => ({ ...current, dividend: Math.max(dividend, 0) }))} />
@@ -453,12 +520,12 @@ export default function Home() {
           </div>
 
           <div className="greeks-block">
-            <div><span>DELTA</span><strong>{signed(selectedDelta, 4)}</strong></div>
-            <div><span>GAMMA</span><strong>{result.gamma.toFixed(4)}</strong></div>
-            <div><span>THETA / DAY</span><strong>{signed(selectedTheta, 4)}</strong></div>
-            <div><span>VEGA / PT</span><strong>{signed(result.vega, 4)}</strong></div>
-            <div><span>RHO / PT</span><strong>{signed(selectedRho, 4)}</strong></div>
-            <div><span>MODEL P(ITM)</span><strong>{(probability * 100).toFixed(1)}%</strong></div>
+            <div><span>DELTA</span><strong>{modelAvailable ? signed(selectedDelta, 4) : "—"}</strong></div>
+            <div><span>GAMMA</span><strong>{modelAvailable ? result.gamma.toFixed(4) : "—"}</strong></div>
+            <div><span>THETA / DAY</span><strong>{modelAvailable ? signed(selectedTheta, 4) : "—"}</strong></div>
+            <div><span>VEGA / PT</span><strong>{modelAvailable ? signed(result.vega, 4) : "—"}</strong></div>
+            <div><span>RHO / PT</span><strong>{modelAvailable ? signed(selectedRho, 4) : "—"}</strong></div>
+            <div><span>MODEL P(ITM)</span><strong>{modelAvailable ? `${(probability * 100).toFixed(1)}%` : "—"}</strong></div>
           </div>
         </aside>
       </section>
@@ -466,9 +533,9 @@ export default function Home() {
       <section className="methodology">
         <p className="section-number">04 / READ THE NUMBER CORRECTLY</p>
         <div className="method-grid">
-          <div><span>01</span><strong>Market data enters</strong><p>Spot, strike, expiration, bid, ask, and volatility are loaded from the selected chain.</p></div>
-          <div><span>02</span><strong>The model recalculates</strong><p>Change volatility, rates, or dividends to test your own view without changing the quote.</p></div>
-          <div><span>03</span><strong>Compare—not predict</strong><p>The difference is a theoretical model gap. Liquidity, exercise style, and execution still matter.</p></div>
+          <div><span>01</span><strong>Same contract</strong><p>Match symbol, call or put, expiration, strike, and quote timestamp before comparing with Robinhood.</p></div>
+          <div><span>02</span><strong>Same feed quality</strong><p>OPRA is the consolidated options market. Alpaca Basic indicative prices are modified and can differ.</p></div>
+          <div><span>03</span><strong>Model—not market mark</strong><p>Black–Scholes is theoretical. Robinhood’s mark, execution price, and American exercise effects can differ.</p></div>
         </div>
       </section>
 
@@ -485,26 +552,44 @@ export default function Home() {
           <section className="connect-modal" role="dialog" aria-modal="true" aria-labelledby="connect-title">
             <button className="modal-close" type="button" aria-label="Close" onClick={() => setConnectOpen(false)}>×</button>
             <p className="section-number">LIVE MARKET CONNECTION</p>
-            <h2 id="connect-title">Connect Tradier</h2>
+            <h2 id="connect-title">Connect verified quotes</h2>
             <p className="modal-copy">
-              A Tradier production token unlocks live SPY, SPX, and QQQ option chains. The token stays in this browser session and is never saved by the site.
+              The old sample chain has been removed. Choose Alpaca for SPY/QQQ or Tradier for SPY/SPX/QQQ. Credentials stay in this browser tab and are only forwarded to the selected provider.
             </p>
-            <label className="token-field">
-              <span>PRODUCTION TOKEN</span>
-              <input
-                type="password"
-                value={tokenDraft}
-                onChange={(event) => setTokenDraft(event.target.value)}
-                placeholder="Paste token"
-                autoComplete="off"
-              />
-            </label>
+            <div className="provider-toggle" role="group" aria-label="Market data provider">
+              <button type="button" className={connectionDraft.provider === "alpaca" ? "active" : ""} onClick={() => setConnectionDraft((current) => ({ ...current, provider: "alpaca" }))}>Alpaca</button>
+              <button type="button" className={connectionDraft.provider === "tradier" ? "active" : ""} onClick={() => setConnectionDraft((current) => ({ ...current, provider: "tradier" }))}>Tradier</button>
+            </div>
+            {connectionDraft.provider === "alpaca" ? (
+              <div className="credential-stack">
+                <label className="token-field">
+                  <span>ALPACA KEY ID</span>
+                  <input type="password" value={connectionDraft.alpacaKeyId} onChange={(event) => setConnectionDraft((current) => ({ ...current, alpacaKeyId: event.target.value }))} placeholder="Paste key ID" autoComplete="off" />
+                </label>
+                <label className="token-field">
+                  <span>ALPACA SECRET KEY</span>
+                  <input type="password" value={connectionDraft.alpacaSecretKey} onChange={(event) => setConnectionDraft((current) => ({ ...current, alpacaSecretKey: event.target.value }))} placeholder="Paste secret key" autoComplete="off" />
+                </label>
+                <label className="token-field">
+                  <span>OPTIONS FEED</span>
+                  <select value={connectionDraft.alpacaFeed} onChange={(event) => setConnectionDraft((current) => ({ ...current, alpacaFeed: event.target.value === "opra" ? "opra" : "indicative" }))}>
+                    <option value="indicative">Indicative · Alpaca Basic</option>
+                    <option value="opra">OPRA · Algo Trader Plus</option>
+                  </select>
+                </label>
+              </div>
+            ) : (
+              <label className="token-field">
+                <span>TRADIER PRODUCTION TOKEN</span>
+                <input type="password" value={connectionDraft.tradierToken} onChange={(event) => setConnectionDraft((current) => ({ ...current, tradierToken: event.target.value }))} placeholder="Paste token" autoComplete="off" />
+              </label>
+            )}
             <div className="modal-actions">
               <button className="primary-action" type="button" onClick={connect}>Connect live feed</button>
-              {liveToken && <button className="text-action" type="button" onClick={disconnect}>Disconnect</button>}
+              {hasSavedCredentials && <button className="text-action" type="button" onClick={disconnect}>Disconnect</button>}
             </div>
             <p className="modal-footnote">
-              No account yet? <a href="https://docs.tradier.com/docs/getting-started" target="_blank" rel="noreferrer">See Tradier setup</a>. Until connected, the site remains fully usable with clearly labeled simulated data.
+              Alpaca Basic data is useful for testing but will not exactly match Robinhood. For the closest comparison, use OPRA and compare the same bid/ask timestamp. <a href="https://docs.alpaca.markets/docs/getting-started" target="_blank" rel="noreferrer">Alpaca setup</a>
             </p>
           </section>
         </div>

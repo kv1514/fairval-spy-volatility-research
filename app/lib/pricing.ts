@@ -73,7 +73,46 @@ export function valueForType(result: ReturnType<typeof calculateBlackScholes>, t
   return type === "call" ? result.call : result.put;
 }
 
-export function daysToExpiration(expiration: string) {
-  const settlement = Date.parse(`${expiration}T20:00:00.000Z`);
-  return Math.max((settlement - Date.now()) / 86_400_000, 1 / 24);
+function timeZoneOffset(timestamp: number, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(timestamp));
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const representedAsUtc = Date.UTC(
+    Number(values.year),
+    Number(values.month) - 1,
+    Number(values.day),
+    Number(values.hour),
+    Number(values.minute),
+    Number(values.second),
+  );
+  return representedAsUtc - timestamp;
+}
+
+function newYorkSettlement(expiration: string, settlementMinutes: number) {
+  const [year, month, day] = expiration.split("-").map(Number);
+  if (![year, month, day].every(Number.isFinite)) return Number.NaN;
+  const hour = Math.floor(settlementMinutes / 60);
+  const minute = settlementMinutes % 60;
+  const localSettlementAsUtc = Date.UTC(year, month - 1, day, hour, minute, 0);
+  const firstOffset = timeZoneOffset(localSettlementAsUtc, "America/New_York");
+  const firstPass = localSettlementAsUtc - firstOffset;
+  return localSettlementAsUtc - timeZoneOffset(firstPass, "America/New_York");
+}
+
+export function daysToExpiration(
+  expiration: string,
+  now = Date.now(),
+  settlementMinutes = 16 * 60 + 15,
+) {
+  const settlement = newYorkSettlement(expiration, settlementMinutes);
+  if (!Number.isFinite(settlement)) return 1 / 24;
+  return Math.max((settlement - now) / 86_400_000, 1 / (24 * 60));
 }
