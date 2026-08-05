@@ -107,6 +107,15 @@ test("fair-smile interpolation excludes the contract's own noisy IV", () => {
   assert.equal(iv, 25);
 });
 
+test("robust smile fit resists a corrupted neighboring IV quote", () => {
+  const observations = [80, 85, 90, 95, 100, 105, 110, 115, 120].map((strike) => ({
+    strike,
+    iv: strike === 105 ? 60 : 20 + (strike - 100) * 0.1,
+  }));
+  const iv = core.smoothedVolatility(100, observations, 100);
+  assert.ok(Math.abs(iv - 20) < 1);
+});
+
 test("uses the New York option close for intraday expiry", () => {
   const days = core.daysToExpiration("2026-08-04", Date.parse("2026-08-04T20:00:00Z"));
   assert.ok(Math.abs(days - 15 / 1440) < 1e-9);

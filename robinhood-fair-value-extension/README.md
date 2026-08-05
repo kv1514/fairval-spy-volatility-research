@@ -9,7 +9,7 @@ A local Chrome extension that reads any classic single-stock, ETF, or supported-
 - Reads Robinhood's exact Mark and displayed IV whenever a contract is expanded, and caches them for that chain.
 - Provides **Scan visible Mark IVs** to expand each rendered strike in sequence and capture Robinhood's exact values without placing or preparing an order.
 - Uses a clearly starred Ask-implied IV estimate only for rows that have not yet been expanded or scanned.
-- Builds a neighbor-interpolated strike-by-strike IV smile for relative fair-value comparisons. A contract's own quote is excluded from its fair-IV estimate so one noisy quote cannot define its own fair value.
+- Builds an outlier-resistant local IV smile for relative fair-value comparisons. A contract's own quote is excluded from its fair-IV estimate, and robust local regression reduces contamination from a bad neighboring quote.
 - When Robinhood displays an extended-hours ETF price beside a frozen option quote, removes the displayed after-hours or pre-market move and uses the regular-session close paired with that quote.
 - Fetches the official U.S. Treasury CMT curve and interpolates a rate for the selected expiration.
 - Supports arbitrary Robinhood option tickers, including symbols with share-class punctuation and digits.
@@ -71,3 +71,13 @@ For scanned rows, the extension compares fair value with Robinhood's exact Mark 
 These are transparent screen-grade approximations, not OPRA/Cboe professional analytics. Cboe's production methodology uses NBBO data, a full interest-rate curve, forward discrete-dividend forecasts, and an American-style model where applicable. The extension therefore labels output as research candidates rather than trade recommendations.
 
 See [SOURCES.md](SOURCES.md) for the source URLs, as-of dates, embedded fallback curve, and interpretation notes.
+
+## Reproducible simulation
+
+Run the deterministic stress harness with Node.js:
+
+```text
+node tests/simulation.mjs [seed] [chain-count] [formula-case-count]
+```
+
+The default run covers 5,000 formula inversions and 1,000 synthetic call/put chains across stock prices, expirations, IV smiles, carry rates, spreads, quote noise, and injected 20%–40% mispricings. See [SIMULATION_RESULTS.md](SIMULATION_RESULTS.md) for the latest results and limitations.

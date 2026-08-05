@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Robinhood Fair Value Overlay",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Screens Robinhood option chains for Mark-IV-aware relative-value research candidates.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://home.treasury.gov/*"],

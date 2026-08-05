@@ -94,7 +94,9 @@
       else low = midpoint;
     }
     const result = (low + high) / 2;
-    return Number.isFinite(result) ? result : null;
+    const sensitivity = calculateBlackScholes({ ...input, volatility: result }).vega;
+    const minimumIdentifiableVega = Math.max(Number(input.spot) * 1e-9, 1e-7);
+    return Number.isFinite(result) && sensitivity >= minimumIdentifiableVega ? result : null;
   }
 
   function impliedDividendYield(input) {
@@ -277,30 +279,100 @@
       (point) => Number.isFinite(point.strike) && Number.isFinite(point.iv) && point.iv >= 1 && point.iv <= 300,
     );
     if (!valid.length) return null;
-    const lower = valid
-      .filter((point) => point.strike < strike)
-      .sort((a, b) => b.strike - a.strike)[0];
-    const upper = valid
-      .filter((point) => point.strike > strike)
-      .sort((a, b) => a.strike - b.strike)[0];
-    if (lower && upper) {
-      const fraction = (strike - lower.strike) / (upper.strike - lower.strike);
-      return lower.iv + fraction * (upper.iv - lower.iv);
-    }
-
     const neighbors = valid
       .filter((point) => point.strike !== strike)
       .sort((a, b) => Math.abs(a.strike - strike) - Math.abs(b.strike - strike))
-      .slice(0, 3);
+      .slice(0, 9);
     if (!neighbors.length) return valid[0].iv;
-    let weightedVolatility = 0;
-    let totalWeight = 0;
-    for (const point of neighbors) {
-      const weight = 1 / Math.max(Math.abs(point.strike - strike), Number(spot) * 0.0001, 0.01);
-      weightedVolatility += point.iv * weight;
-      totalWeight += weight;
+    if (neighbors.length === 1) return neighbors[0].iv;
+    if (neighbors.length === 2) {
+      const [first, second] = neighbors.sort((a, b) => a.strike - b.strike);
+      const fraction = (strike - first.strike) / (second.strike - first.strike);
+      return first.iv + fraction * (second.iv - first.iv);
     }
-    return totalWeight ? weightedVolatility / totalWeight : null;
+
+    const scale = Math.max(Number(spot), Number(strike), 1);
+    const hasLower = neighbors.some((point) => point.strike < strike);
+    const hasUpper = neighbors.some((point) => point.strike > strike);
+    const degree = hasLower && hasUpper && neighbors.length >= 5 ? 2 : 1;
+    const samples = neighbors.map((point) => ({
+      x: (point.strike - strike) / scale,
+      y: point.iv,
+      distanceWeight: 1 / (1 + (Math.abs(point.strike - strike) / (scale * 0.06)) ** 2),
+    }));
+
+    const solve = (weights) => {
+      const size = degree + 1;
+      const matrix = Array.from({ length: size }, () => Array(size + 1).fill(0));
+      for (let row = 0; row < size; row += 1) {
+        for (let column = 0; column < size; column += 1) {
+          matrix[row][column] = samples.reduce(
+            (total, sample, index) => total + weights[index] * sample.x ** (row + column),
+            0,
+          );
+        }
+        matrix[row][size] = samples.reduce(
+          (total, sample, index) => total + weights[index] * sample.y * sample.x ** row,
+          0,
+        );
+      }
+      for (let pivot = 0; pivot < size; pivot += 1) {
+        let best = pivot;
+        for (let row = pivot + 1; row < size; row += 1) {
+          if (Math.abs(matrix[row][pivot]) > Math.abs(matrix[best][pivot])) best = row;
+        }
+        if (Math.abs(matrix[best][pivot]) < 1e-12) return null;
+        [matrix[pivot], matrix[best]] = [matrix[best], matrix[pivot]];
+        const divisor = matrix[pivot][pivot];
+        for (let column = pivot; column <= size; column += 1) matrix[pivot][column] /= divisor;
+        for (let row = 0; row < size; row += 1) {
+          if (row === pivot) continue;
+          const factor = matrix[row][pivot];
+          for (let column = pivot; column <= size; column += 1) {
+            matrix[row][column] -= factor * matrix[pivot][column];
+          }
+        }
+      }
+      return matrix.map((row) => row[size]);
+    };
+
+    const pairwiseSlopes = [];
+    for (let first = 0; first < samples.length; first += 1) {
+      for (let second = first + 1; second < samples.length; second += 1) {
+        const difference = samples[second].x - samples[first].x;
+        if (Math.abs(difference) > 1e-12) {
+          pairwiseSlopes.push((samples[second].y - samples[first].y) / difference);
+        }
+      }
+    }
+    const initialSlope = median(pairwiseSlopes) || 0;
+    const initialIntercept = median(samples.map((sample) => sample.y - initialSlope * sample.x)) || 0;
+    const initialResiduals = samples.map((sample) => sample.y - initialIntercept - initialSlope * sample.x);
+    const initialCenter = median(initialResiduals) || 0;
+    const initialMad = median(initialResiduals.map((residual) => Math.abs(residual - initialCenter))) || 0.05;
+    const initialCutoff = Math.max(3 * 1.4826 * initialMad, 0.5);
+    let robustWeights = samples.map((sample, index) => {
+      const residual = Math.abs(initialResiduals[index] - initialCenter);
+      return sample.distanceWeight * (residual <= initialCutoff ? 1 : initialCutoff / residual);
+    });
+    let coefficients = solve(robustWeights);
+    if (!coefficients) return median(neighbors.map((point) => point.iv));
+    for (let iteration = 0; iteration < 5; iteration += 1) {
+      const residuals = samples.map((sample) => {
+        const fitted = coefficients.reduce((total, coefficient, power) => total + coefficient * sample.x ** power, 0);
+        return sample.y - fitted;
+      });
+      const residualCenter = median(residuals) || 0;
+      const mad = median(residuals.map((residual) => Math.abs(residual - residualCenter))) || 0.05;
+      const cutoff = Math.max(1.5 * 1.4826 * mad, 0.15);
+      robustWeights = samples.map((sample, index) => {
+        const residual = Math.abs(residuals[index] - residualCenter);
+        const huberWeight = residual <= cutoff ? 1 : cutoff / residual;
+        return sample.distanceWeight * huberWeight;
+      });
+      coefficients = solve(robustWeights) || coefficients;
+    }
+    return Number.isFinite(coefficients[0]) ? Math.min(Math.max(coefficients[0], 1), 300) : null;
   }
 
   function parseMoney(value) {
