@@ -1,0 +1,20 @@
+:root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+body { width: 310px; margin: 0; background: #f5f6f4; color: #101b24; }
+main { padding: 17px; }
+.brand { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.brand > span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 8px; background: #101b24; color: #00c805; font: 700 20px Georgia, serif; }
+.brand strong, .brand small { display: block; }
+.brand strong { font-size: 14px; }
+.brand small { margin-top: 2px; color: #69747c; font-size: 9px; }
+label { display: block; margin-top: 11px; color: #5c6870; font-size: 10px; }
+input[type="number"], select { width: 100%; height: 36px; margin-top: 5px; padding: 0 9px; border: 1px solid #c3c9cd; border-radius: 6px; outline: none; background: white; color: #101b24; font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+input:focus, select:focus { border-color: #00a904; box-shadow: 0 0 0 3px rgba(0,200,5,.1); }
+input:disabled { background: #e8ebec; color: #7d868b; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.enabled { display: flex; align-items: center; justify-content: space-between; min-height: 38px; margin: 0; padding: 0 10px; border: 1px solid #d2d6d8; border-radius: 6px; background: white; color: #26333c; font-weight: 650; }
+.enabled.compact { min-height: 34px; margin-top: 12px; font-size: 9px; }
+.enabled input { accent-color: #00c805; }
+button { width: 100%; height: 39px; margin-top: 15px; border: 0; border-radius: 6px; background: #00c805; color: #062f08; font-size: 11px; font-weight: 800; cursor: pointer; }
+button:hover { background: #00b805; }
+#message { min-height: 14px; margin: 9px 0 0; color: #758087; font-size: 9px; text-align: center; }

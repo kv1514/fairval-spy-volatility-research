@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Robinhood Fair Value Overlay",
+  "version": "1.0.0",
+  "description": "Adds local Black-Scholes fair-value estimates beside live Robinhood option-chain prices.",
+  "permissions": ["storage", "activeTab"],
+  "action": {
+    "default_title": "Fair Value Overlay",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://robinhood.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

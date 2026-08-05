@@ -1,0 +1,76 @@
+#bsfv-panel {
+  --bsfv-ink: #101b24;
+  --bsfv-green: #00c805;
+  --bsfv-muted: #69747c;
+  position: fixed;
+  z-index: 2147483646;
+  left: 18px;
+  bottom: 18px;
+  width: 296px;
+  overflow: hidden;
+  border: 1px solid #263640;
+  border-radius: 10px;
+  background: #fff;
+  color: var(--bsfv-ink);
+  box-shadow: 0 16px 48px rgba(14, 26, 35, 0.24);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+#bsfv-panel * { box-sizing: border-box; }
+.bsfv-panel-header { display: flex; align-items: center; justify-content: space-between; min-height: 42px; padding: 0 12px; background: var(--bsfv-ink); color: white; }
+.bsfv-panel-header > div { display: flex; align-items: center; gap: 8px; }
+.bsfv-panel-header strong { font-size: 10px; letter-spacing: .08em; }
+.bsfv-live-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--bsfv-green); box-shadow: 0 0 0 4px rgba(0, 200, 5, .14); }
+#bsfv-collapse { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: white; font-size: 18px; cursor: pointer; }
+#bsfv-collapse:hover { background: rgba(255,255,255,.1); }
+#bsfv-panel-body { padding: 12px; }
+#bsfv-context { margin: 0 0 11px; font-weight: 700; }
+.bsfv-control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.bsfv-control-grid label { color: var(--bsfv-muted); font-size: 10px; }
+.bsfv-control-grid label > span { position: relative; display: block; margin-top: 4px; }
+.bsfv-control-grid input, .bsfv-control-grid select { width: 100%; height: 32px; margin-top: 4px; padding: 0 25px 0 8px; border: 1px solid #c7cdd1; border-radius: 5px; outline: none; background: white; color: var(--bsfv-ink); font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.bsfv-control-grid select { padding-right: 4px; }
+.bsfv-control-grid input:focus, .bsfv-control-grid select:focus { border-color: #00a904; box-shadow: 0 0 0 3px rgba(0, 200, 5, .11); }
+.bsfv-control-grid input:disabled { background: #eef0f1; color: #7b848a; }
+.bsfv-control-grid small { position: absolute; right: 8px; top: 50%; transform: translateY(-23%); color: #8a9398; font-size: 9px; pointer-events: none; }
+.bsfv-check { display: flex; align-items: center; gap: 7px; margin-top: 11px; color: #59656d; font-size: 10px; }
+.bsfv-check input { accent-color: var(--bsfv-green); }
+#bsfv-status { margin: 11px 0 0; padding: 8px; border-left: 2px solid var(--bsfv-green); background: #f1fbf2; color: #3b5540; font: 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.bsfv-disclaimer { margin: 9px 0 0; color: #879097; font-size: 8px; text-transform: uppercase; letter-spacing: .04em; }
+#bsfv-panel.is-collapsed { width: 226px; }
+#bsfv-panel.is-disabled .bsfv-live-dot { background: #9aa3a8; box-shadow: none; }
+
+[data-bsfv-cell] { position: relative !important; overflow: visible !important; }
+[data-bsfv-overlay] {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  min-width: 58px;
+  height: 20px;
+  margin-left: 7px;
+  padding: 0 6px;
+  border: 1px solid #a9dcb0;
+  border-radius: 999px;
+  background: #eefaf0;
+  color: #087610;
+  font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+  pointer-events: none;
+  vertical-align: middle;
+}
+[data-bsfv-overlay][data-signal="below"] { border-color: #efb6af; background: #fff1ef; color: #b52a1e; }
+[data-bsfv-overlay][data-signal="flat"] { border-color: #c8ced2; background: #f3f5f6; color: #59656d; }
+
+@media (max-width: 760px) {
+  #bsfv-panel { left: 10px; right: 10px; bottom: 10px; width: auto; }
+  #bsfv-panel.is-collapsed { right: auto; width: 226px; }
+}
+
+@media (prefers-color-scheme: dark) {
+  #bsfv-panel { background: #17212a; color: #f4f6f7; border-color: #4a5964; }
+  .bsfv-control-grid input, .bsfv-control-grid select { background: #202d37; border-color: #55636d; color: white; }
+  .bsfv-control-grid input:disabled { background: #2a353d; }
+  #bsfv-status { background: #19331f; color: #b9e9be; }
+}
