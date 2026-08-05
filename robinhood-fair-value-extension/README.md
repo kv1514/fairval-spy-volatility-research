@@ -15,9 +15,10 @@ A local Chrome extension that reads any classic single-stock, ETF, or supported-
 - Supports arbitrary Robinhood option tickers, including symbols with share-class punctuation and digits.
 - After three or more fresh Mark/IV pairs are scanned on expirations of at least seven days, calibrates a robust chain-implied dividend/carry yield. This avoids assuming that every stock has the same yield.
 - Retains expiration-aware public dividend fallbacks for SPY, SPX, and QQQ. Other tickers use an explicitly labeled 0% fallback until enough exact quotes are scanned; manual dividend input remains available.
-- Highlights only fresh, liquid contracts whose modeled edge extends past the executable ask/bid, clears the configured percentage threshold, and is not explained by a wide spread.
+- In independent-volatility modes, highlights only fresh, liquid contracts whose price edge and volatility direction agree, whose modeled edge clears the executable quote and spread gates, and whose IV is unusual versus the same historical ticker/option-type/DTE/moneyness bucket.
 - Adds an independent **Own forecast + market skew** mode. It shifts the live strike smile so its ATM level equals the user's realized-volatility forecast, then shows the resulting per-contract `IV EDGE` and model price.
-- Adds a **Walk-forward volatility forecast** mode backed by a Python/pandas research engine. The engine tests 5/10/20/60-day realized volatility, fixed and optimized variance blends, and coarse-to-fine EWMA lambda selection across 1/2/3/5/10-day horizons without training on unfinished future targets.
+- Adds a **Walk-forward volatility forecast** mode backed by a Python/pandas research engine. It tests 5/10/20/60-day realized volatility, fixed and optimized variance blends, and coarse-to-fine EWMA selection across 1/2/3/5/10-day horizons. Model selection minimizes past out-of-sample variance error without training on unfinished targets.
+- Shows implied variance, forecast variance, implied-minus-forecast variance edge, dollar gamma, the Haugh gamma-weighted edge, vega-normalized price edge, and an approximate matched-bucket IV percentile in each badge tooltip.
 - Records exact quote snapshots and forward 15/60-minute paper outcomes locally. Long-side candidates are scored ask-to-later-bid; sell-side candidates are scored bid-to-later-ask. The popup can export or clear this JSON study.
 - Makes no brokerage-data requests, does not read account credentials, and cannot place orders. Its only external request is the public Treasury curve.
 
@@ -45,9 +46,11 @@ The green or red `FLAG` treatment is an idea-generation screen, not a buy/sell i
 - that executable edge exceeds the selected **Minimum edge %** and at least half the full bid/ask spread;
 - the full spread is no wider than **Maximum spread %** of Mark;
 - volume is at least 10 contracts or open interest is at least 100; and
-- the exact quote was captured within the last two minutes.
+- the exact quote was captured within the last two minutes;
+- long-vol candidates have both positive price edge and forecast IV above market IV, while short-vol candidates have negative long-option price edge and market IV above forecast IV; and
+- the IV percentile is at most 40 for a long-vol candidate or at least 60 for a short-vol candidate versus the same historical ticker, option type, DTE, and moneyness bucket.
 
-For an arbitrary ticker, flags remain disabled until chain-implied carry is calibrated from at least three eligible Mark/IV pairs, or the user turns off automatic dividends and supplies a manual dividend/carry assumption. This prevents an unknown 0% dividend fallback from masquerading as a pricing opportunity.
+Flags require a walk-forward, own-forecast, or manual volatility view; circular market-smile and individual-market-IV modes cannot trigger them. For an arbitrary ticker, flags also remain disabled until carry is calibrated or supplied manually and until the imported JSON contains a matched historical IV bucket. This prevents an unknown yield or normal downside skew from masquerading as a pricing opportunity.
 
 The panel ranks up to five flags by edge-to-spread coverage. A flag means “record and review this contract and its assumptions,” not “place this trade.” Automatic refresh keeps the exact quote cache current while the chain remains open.
 
@@ -59,6 +62,8 @@ The panel ranks up to five flags by edge-to-spread coverage. A flag means “rec
 - **Individual market IV** uses each contract's raw quote-implied IV. With a zero IV shift, the model necessarily reproduces the quote used to infer IV; this mode is diagnostic, not an independent fair value.
 - **Flat own-vol forecast** applies one user-entered volatility to every strike without preserving market skew.
 - **IV EDGE** is fair/model IV minus that contract's market IV. A positive number means the model volatility is higher; a negative number means it is lower.
+- **VAR** is market implied variance minus forecast variance, in annualized decimal-variance basis points. Positive supports the short-vol sign in Haugh's delta-hedged approximation; negative supports the long-vol sign.
+- **IVP** is an approximate historical IV percentile for the matched ticker, call/put, DTE, and moneyness bucket. No match means no strongest research flag.
 - **Fair-IV shift** adds or subtracts volatility points from whichever IV model is selected so you can test your own volatility view.
 - **Minimum edge %** controls how far the model must remain beyond the executable ask or bid before a contract is flagged.
 - **Maximum spread %** rejects illiquid quotes whose spread can explain the apparent discrepancy.

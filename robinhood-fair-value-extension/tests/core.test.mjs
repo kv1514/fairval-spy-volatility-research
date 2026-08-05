@@ -50,6 +50,72 @@ test("selects the nearest leakage-safe walk-forward horizon", () => {
   assert.equal(core.forecastHorizonFromDte(7.2), 7);
 });
 
+test("matches historical IV context by ticker, option type, DTE, and moneyness", () => {
+  const payload = {
+    surface_benchmarks: [
+      { ticker: "SPY", option_type: "put", dte_bucket: 5, moneyness_bucket: "downside", observations: 80, p10: 18, p25: 20, p50: 23, p75: 27, p90: 31 },
+      { ticker: "SPY", option_type: "call", dte_bucket: 5, moneyness_bucket: "downside", observations: 75, p10: 14, p25: 16, p50: 18, p75: 20, p90: 23 },
+    ],
+  };
+  const selected = core.selectSurfaceBenchmark(payload, "SPY", "put", 6, -0.05);
+  assert.equal(selected.optionType, "put");
+  assert.equal(selected.moneynessBucket, "downside");
+  assert.equal(selected.dteBucket, 5);
+  assert.equal(core.selectSurfaceBenchmark(payload, "SPY", "put", 6, 0.01), null);
+  assert.equal(core.approximateIvPercentile(23, selected), 50);
+});
+
+test("uses Haugh short-option sign and suppresses uncontextualized skew flags", () => {
+  const richBenchmark = { p10: 12, p25: 14, p50: 16, p75: 18, p90: 20 };
+  const shortVol = core.varianceResearchContext({
+    marketIv: 22,
+    forecastVol: 16,
+    priceEdge: -0.4,
+    spot: 100,
+    gamma: 0.05,
+    vega: 0.12,
+    days: 5,
+    benchmark: richBenchmark,
+  });
+  assert.equal(shortVol.candidateSide, "short_vol");
+  assert.ok(shortVol.varianceEdge > 0);
+  assert.ok(shortVol.dollarGamma > 0);
+  assert.ok(shortVol.gammaWeightedEdge > 0);
+  assert.ok(shortVol.vegaNormalizedEdge < 0);
+  assert.equal(shortVol.surfaceContextPass, true);
+
+  const ordinaryPutSkew = core.varianceResearchContext({
+    marketIv: 22,
+    forecastVol: 16,
+    priceEdge: -0.4,
+    spot: 100,
+    gamma: 0.05,
+    vega: 0.12,
+    days: 5,
+    benchmark: { p10: 20, p25: 22, p50: 24, p75: 27, p90: 31 },
+  });
+  assert.equal(ordinaryPutSkew.candidateSide, "short_vol");
+  assert.equal(ordinaryPutSkew.surfaceContextPass, false);
+});
+
+test("uses the opposite Haugh sign for a consistent long-vol candidate", () => {
+  const result = core.varianceResearchContext({
+    marketIv: 15,
+    forecastVol: 20,
+    priceEdge: 0.25,
+    spot: 100,
+    gamma: 0.06,
+    vega: 0.15,
+    days: 2,
+    benchmark: { p10: 14, p25: 16, p50: 18, p75: 20, p90: 22 },
+  });
+  assert.equal(result.candidateSide, "long_vol");
+  assert.ok(result.varianceEdge < 0);
+  assert.ok(result.gammaWeightedEdge < 0);
+  assert.ok(result.vegaNormalizedEdge > 0);
+  assert.equal(result.surfaceContextPass, true);
+});
+
 test("parses the visible Robinhood option-chain fields", () => {
   assert.deepEqual(
     { ...core.parseHeading("SPY buy Call") },

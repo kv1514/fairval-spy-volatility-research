@@ -17,7 +17,7 @@
   };
   const IV_SOURCES = ["walkforward", "surface", "forecast", "individual", "manual"];
   const DEFAULT_SETTINGS = {
-    settingsVersion: 5,
+    settingsVersion: 6,
     enabled: true,
     ivSource: "surface",
     volatility: 20,
@@ -34,7 +34,7 @@
     paperRecording: true,
     collapsed: false,
   };
-  const PAPER_STUDY_VERSION = 2;
+  const PAPER_STUDY_VERSION = 3;
   const PAPER_MIN_SPACING_MS = 15_000;
 
   const normalPdf = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
@@ -673,6 +673,131 @@
     };
   }
 
+  function moneynessBucket(logMoneyness) {
+    const value = Number(logMoneyness);
+    if (!Number.isFinite(value)) return null;
+    if (value <= -0.10) return "downside_deep";
+    if (value <= -0.03) return "downside";
+    if (value < 0.03) return "atm";
+    if (value < 0.10) return "upside";
+    return "upside_deep";
+  }
+
+  function nearestDteBucket(days) {
+    const buckets = [1, 2, 3, 5, 10, 20, 30, 60, 90, 180, 365];
+    const target = Math.max(Number(days) || 1, 1);
+    return buckets.reduce((best, candidate) => {
+      const candidateDistance = Math.abs(candidate - target);
+      const bestDistance = Math.abs(best - target);
+      return candidateDistance < bestDistance || (candidateDistance === bestDistance && candidate > best)
+        ? candidate
+        : best;
+    }, buckets[0]);
+  }
+
+  function selectSurfaceBenchmark(payload, ticker, optionType, days, logMoneyness) {
+    if (!Array.isArray(payload?.surface_benchmarks)) return null;
+    const normalizedTicker = String(ticker || "").toUpperCase() === "SPXW"
+      ? "SPX"
+      : String(ticker || "").toUpperCase();
+    const type = String(optionType || "").toLowerCase();
+    const bucket = moneynessBucket(logMoneyness);
+    const targetDte = nearestDteBucket(days);
+    const eligible = payload.surface_benchmarks
+      .filter((record) => String(record?.ticker || "").toUpperCase() === normalizedTicker)
+      .filter((record) => String(record?.option_type || "").toLowerCase() === type)
+      .filter((record) => String(record?.moneyness_bucket || "") === bucket)
+      .filter((record) => Number(record?.observations) >= 10)
+      .filter((record) => ["p10", "p25", "p50", "p75", "p90"].every((key) => Number.isFinite(Number(record?.[key]))))
+      .sort((left, right) => Math.abs(Number(left.dte_bucket) - targetDte) - Math.abs(Number(right.dte_bucket) - targetDte));
+    if (!eligible.length) return null;
+    const selected = eligible[0];
+    return {
+      ticker: normalizedTicker,
+      optionType: type,
+      dteBucket: Number(selected.dte_bucket),
+      moneynessBucket: bucket,
+      observations: Number(selected.observations),
+      p10: Number(selected.p10),
+      p25: Number(selected.p25),
+      p50: Number(selected.p50),
+      p75: Number(selected.p75),
+      p90: Number(selected.p90),
+    };
+  }
+
+  function approximateIvPercentile(marketIv, benchmark) {
+    const value = Number(marketIv);
+    if (!benchmark || !Number.isFinite(value)) return null;
+    const anchors = [
+      [Number(benchmark.p10), 10],
+      [Number(benchmark.p25), 25],
+      [Number(benchmark.p50), 50],
+      [Number(benchmark.p75), 75],
+      [Number(benchmark.p90), 90],
+    ];
+    if (value <= anchors[0][0]) return 5;
+    if (value >= anchors.at(-1)[0]) return 95;
+    for (let index = 0; index < anchors.length - 1; index += 1) {
+      const [lowValue, lowPercentile] = anchors[index];
+      const [highValue, highPercentile] = anchors[index + 1];
+      if (value <= highValue) {
+        if (highValue <= lowValue) return (lowPercentile + highPercentile) / 2;
+        return lowPercentile + ((value - lowValue) / (highValue - lowValue)) * (highPercentile - lowPercentile);
+      }
+    }
+    return null;
+  }
+
+  function varianceResearchContext({ marketIv, forecastVol, priceEdge, spot, gamma, vega, days, benchmark }) {
+    const market = Number(marketIv);
+    const forecast = Number(forecastVol);
+    const edge = Number(priceEdge);
+    const timeYears = Math.max(Number(days) || 0, 0) / 365;
+    const impliedVariance = Number.isFinite(market) ? (market / 100) ** 2 : null;
+    const forecastVariance = Number.isFinite(forecast) ? (forecast / 100) ** 2 : null;
+    const varianceEdge = impliedVariance == null || forecastVariance == null
+      ? null
+      : impliedVariance - forecastVariance;
+    const dollarGamma = [spot, gamma].every((value) => Number.isFinite(Number(value)))
+      ? 0.5 * Number(spot) ** 2 * Number(gamma)
+      : null;
+    const gammaWeightedEdge = dollarGamma == null || varianceEdge == null
+      ? null
+      : dollarGamma * varianceEdge * timeYears;
+    const vegaNormalizedEdge = Number.isFinite(edge) && Number.isFinite(Number(vega)) && Number(vega) > 0
+      ? edge / Number(vega)
+      : null;
+    const candidateSide = Number.isFinite(edge) && Number.isFinite(market) && Number.isFinite(forecast)
+      ? forecast > market && edge > 0
+        ? "long_vol"
+        : market > forecast && edge < 0
+          ? "short_vol"
+          : forecast > market
+            ? "mixed_short_price"
+            : market > forecast
+              ? "mixed_long_price"
+              : "neutral"
+      : "unavailable";
+    const ivPercentile = approximateIvPercentile(market, benchmark);
+    const surfaceContextPass = candidateSide === "long_vol"
+      ? Number.isFinite(ivPercentile) && ivPercentile <= 40
+      : candidateSide === "short_vol"
+        ? Number.isFinite(ivPercentile) && ivPercentile >= 60
+        : false;
+    return {
+      impliedVariance,
+      forecastVariance,
+      varianceEdge,
+      dollarGamma,
+      gammaWeightedEdge,
+      vegaNormalizedEdge,
+      candidateSide,
+      ivPercentile,
+      surfaceContextPass,
+    };
+  }
+
   function textWithoutOverlay(element) {
     if (!element) return "";
     const copy = element.cloneNode(true);
@@ -702,6 +827,11 @@
     sessionAlignedSpot,
     smoothedVolatility,
     selectVolatilityForecast,
+    moneynessBucket,
+    nearestDteBucket,
+    selectSurfaceBenchmark,
+    approximateIvPercentile,
+    varianceResearchContext,
     thinPaperRecords,
     forecastHorizonFromDte,
   };
@@ -1080,6 +1210,7 @@
         ? "individual quote-implied IV (circular at 0 shift)"
         : `flat own-vol forecast ${Number(settings.volatility).toFixed(2)}%`;
     const exactCopy = `exact Mark IV ${details.exactCount ?? 0}/${details.totalRows ?? 0}`;
+    const historyCopy = `history buckets ${details.surfaceContextCount ?? 0}/${details.totalRows ?? 0}`;
     const rateCopy = settings.autoRate
       ? `r ${Number(details.rate).toFixed(2)}% CMT (${treasuryCurve.date})`
       : `r ${Number(settings.rate).toFixed(2)}% manual`;
@@ -1092,7 +1223,7 @@
     const paperCopy = settings.paperRecording
       ? `paper ${paperStudy.records?.length || 0} · 60m ${paperStudy.outcomes60m?.count || 0}`
       : "paper off";
-    statusLine.textContent = `${ivCopy} · ${exactCopy} · ${autoCopy} · ${paperCopy} · shift ${Number(settings.ivShift).toFixed(2)}pt · ${rateCopy} · ${dividendCopy}`;
+    statusLine.textContent = `${ivCopy} · ${exactCopy} · ${historyCopy} · ${autoCopy} · ${paperCopy} · shift ${Number(settings.ivShift).toFixed(2)}pt · ${rateCopy} · ${dividendCopy}`;
 
     const alerts = details.alerts || [];
     const alertList = panel.querySelector("#bsfv-alert-list");
@@ -1102,7 +1233,9 @@
     for (const alert of alerts.slice(0, 5)) {
       const item = document.createElement("li");
       const direction = alert.direction === "below-model" ? "below model" : "above model";
-      item.textContent = `$${Number(alert.strike).toLocaleString()} ${direction} · ${alert.edgePercent.toFixed(1)}% past ${alert.direction === "below-model" ? "ask" : "bid"} · ${alert.score.toFixed(1)}× spread`;
+      const side = alert.candidateSide === "long_vol" ? "LONG VOL" : "SHORT VOL";
+      const percentile = Number.isFinite(alert.ivPercentile) ? ` · IVP ${alert.ivPercentile.toFixed(0)}` : "";
+      item.textContent = `$${Number(alert.strike).toLocaleString()} ${side} · ${direction} · ${alert.edgePercent.toFixed(1)}% past ${alert.direction === "below-model" ? "ask" : "bid"}${percentile} · ${alert.score.toFixed(1)}× spread`;
       alertList.appendChild(item);
     }
     if (!settings.alertsEnabled) {
@@ -1112,7 +1245,11 @@
     } else if ((details.exactCount ?? 0) < 3) {
       alertNote.textContent = "Waiting for the automatic exact Mark/IV refresh; estimates cannot trigger flags.";
     } else if (details.alertInputReady === false) {
-      alertNote.textContent = "Carry is not calibrated for this ticker/expiry. Use manual dividend/carry before screening flags.";
+      alertNote.textContent = ["surface", "individual"].includes(settings.ivSource)
+        ? "Research flags require your own walk-forward, forecast, or manual volatility view."
+        : "Carry or the walk-forward forecast is not calibrated for this ticker/expiry.";
+    } else if ((details.surfaceContextCount ?? 0) === 0) {
+      alertNote.textContent = "No matched historical ticker/DTE/moneyness IV bucket; skew-safe flags are suppressed.";
     } else {
       alertNote.textContent = "No fresh contract clears the edge, spread, and liquidity gates.";
     }
@@ -1167,6 +1304,17 @@
         marketIv: contract.marketIv,
         fairIv: contract.fairIv,
         ivEdge: contract.ivEdge,
+        impliedVariance: contract.variance.impliedVariance,
+        forecastVariance: contract.variance.forecastVariance,
+        varianceEdge: contract.variance.varianceEdge,
+        dollarGamma: contract.variance.dollarGamma,
+        gammaWeightedEdge: contract.variance.gammaWeightedEdge,
+        vegaNormalizedEdge: contract.variance.vegaNormalizedEdge,
+        candidateSide: contract.variance.candidateSide,
+        ivPercentile: contract.variance.ivPercentile,
+        surfaceContextPass: contract.variance.surfaceContextPass,
+        moneynessBucket: contract.surfaceBenchmark?.moneynessBucket ?? null,
+        dteBucket: contract.surfaceBenchmark?.dteBucket ?? null,
         fairValue: contract.fairValue,
         flagDirection: contract.alert.flagged ? contract.alert.direction : null,
         edgePercent: contract.alert.flagged ? contract.alert.edgePercent : null,
@@ -1239,7 +1387,8 @@
     const forecastRecord = settings.ivSource === "walkforward"
       ? selectVolatilityForecast(volatilityForecast, context.ticker, forecastHorizonFromDte(days))
       : null;
-    const alertInputReady = (!settings.autoDividend || Boolean(inferredCarry) ||
+    const hasOwnVolatilityView = ["walkforward", "forecast", "manual"].includes(settings.ivSource);
+    const alertInputReady = hasOwnVolatilityView && (!settings.autoDividend || Boolean(inferredCarry) ||
       Object.prototype.hasOwnProperty.call(DIVIDEND_DEFAULTS, context.ticker)) &&
       (settings.ivSource !== "walkforward" || Boolean(forecastRecord));
     const rows = [...context.grid.querySelectorAll('[data-testid^="ChainTableRow-"]')];
@@ -1301,21 +1450,58 @@
         dividend: effectiveDividend,
       });
       const difference = fairValue - referencePrice;
-      const alert = settings.alertsEnabled && alertInputReady
+      const marketGreeks = Number.isFinite(marketIv)
+        ? calculateBlackScholes({
+            spot: context.spot,
+            strike,
+            days,
+            volatility: marketIv,
+            rate: effectiveRate,
+            dividend: effectiveDividend,
+          })
+        : null;
+      const surfaceBenchmark = selectSurfaceBenchmark(
+        volatilityForecast,
+        context.ticker,
+        context.optionType,
+        days,
+        Math.log(strike / context.spot),
+      );
+      const variance = varianceResearchContext({
+        marketIv,
+        forecastVol: fairIv,
+        priceEdge: difference,
+        spot: context.spot,
+        gamma: marketGreeks?.gamma,
+        vega: marketGreeks?.vega,
+        days,
+        benchmark: surfaceBenchmark,
+      });
+      const rawAlert = settings.alertsEnabled && alertInputReady
         ? assessDiscrepancy({
             fairValue,
             referencePrice,
             exactQuote,
             gapThreshold: settings.gapThreshold,
             maxSpreadPercent: settings.maxSpreadPercent,
-          })
+        })
+        : { flagged: false };
+      const alert = rawAlert.flagged && variance.surfaceContextPass &&
+        ["long_vol", "short_vol"].includes(variance.candidateSide)
+        ? rawAlert
         : { flagged: false };
       const ivEdge = Number.isFinite(marketIv) ? fairIv - marketIv : null;
-      return { ...contract, fairIv, fairValue, difference, ivEdge, alert };
+      return { ...contract, fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark };
     }).filter(Boolean);
     const alerts = pricedContracts
       .filter((contract) => contract.alert.flagged)
-      .map((contract) => ({ ...contract.alert, strike: contract.strike }))
+      .map((contract) => ({
+        ...contract.alert,
+        strike: contract.strike,
+        candidateSide: contract.variance.candidateSide,
+        ivPercentile: contract.variance.ivPercentile,
+        gammaWeightedEdge: contract.variance.gammaWeightedEdge,
+      }))
       .sort((a, b) => b.score - a.score);
     queuePaperSnapshots(context, pricedContracts, {
       rate: effectiveRate,
@@ -1330,6 +1516,7 @@
       validIvCount: observations.length,
       totalRows: contracts.length,
       exactCount: contracts.filter((contract) => contract.exactQuote).length,
+      surfaceContextCount: pricedContracts.filter((contract) => contract.surfaceBenchmark).length,
       alertInputReady,
       alerts,
       forecastRecord,
@@ -1338,7 +1525,7 @@
     for (const contract of pricedContracts) {
       const {
         row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv,
-        fairIv, fairValue, difference, ivEdge, alert,
+        fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark,
       } = contract;
       let badge = priceCell.querySelector("[data-bsfv-overlay]");
       if (!badge) {
@@ -1359,7 +1546,13 @@
       const ivEdgeCopy = Number.isFinite(ivEdge)
         ? ` · IV EDGE ${ivEdge >= 0 ? "+" : ""}${ivEdge.toFixed(1)}pt`
         : "";
-      const nextText = `FV ${formatMoney(fairValue)} · ${marketIvCopy}${ivEdgeCopy}${flagCopy}`;
+      const varianceEdgeCopy = Number.isFinite(variance.varianceEdge)
+        ? ` · VAR ${variance.varianceEdge >= 0 ? "+" : ""}${(variance.varianceEdge * 10_000).toFixed(0)}bp²`
+        : "";
+      const percentileCopy = Number.isFinite(variance.ivPercentile)
+        ? ` · IVP ${variance.ivPercentile.toFixed(0)}`
+        : "";
+      const nextText = `FV ${formatMoney(fairValue)} · ${marketIvCopy}${ivEdgeCopy}${varianceEdgeCopy}${percentileCopy}${flagCopy}`;
       if (badge.textContent !== nextText) badge.textContent = nextText;
       const comparison = difference >= 0 ? `+${formatMoney(difference)}` : `-${formatMoney(Math.abs(difference))}`;
       badge.dataset.signal = Math.abs(difference) < 0.005 ? "flat" : difference > 0 ? "above" : "below";
@@ -1371,7 +1564,16 @@
       const alertCopy = alert.flagged
         ? ` Research flag: ${alert.edgePercent.toFixed(1)}% beyond the executable ${alert.direction === "below-model" ? "ask" : "bid"}, with a ${alert.spreadPercent.toFixed(1)}% spread and ${alert.score.toFixed(1)}× spread coverage. Candidate for review, not a trade recommendation.`
         : "";
-      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus ${referenceCopy}. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; fair IV ${fairIv.toFixed(2)}%; IV edge ${Number.isFinite(ivEdge) ? `${ivEdge >= 0 ? "+" : ""}${ivEdge.toFixed(2)} volatility points` : "unavailable"}; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend/carry input ${effectiveDividend.toFixed(2)}%.${alertCopy}`;
+      const varianceCopy = Number.isFinite(variance.varianceEdge)
+        ? `implied variance ${(variance.impliedVariance * 100).toFixed(3)}%, forecast variance ${(variance.forecastVariance * 100).toFixed(3)}%, implied-minus-forecast ${(variance.varianceEdge * 10_000).toFixed(1)} bp squared`
+        : "variance edge unavailable";
+      const gammaCopy = Number.isFinite(variance.gammaWeightedEdge)
+        ? `Haugh gamma-weighted edge ${variance.gammaWeightedEdge >= 0 ? "+" : ""}${formatMoney(variance.gammaWeightedEdge)} per share over remaining T`
+        : "gamma-weighted edge unavailable";
+      const historyCopy = surfaceBenchmark && Number.isFinite(variance.ivPercentile)
+        ? `historical ${surfaceBenchmark.optionType} ${surfaceBenchmark.moneynessBucket}/${surfaceBenchmark.dteBucket}D IV percentile about ${variance.ivPercentile.toFixed(1)} from ${surfaceBenchmark.observations} observations`
+        : "no matched historical IV bucket; research flag suppressed";
+      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus ${referenceCopy}. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; forecast IV ${fairIv.toFixed(2)}%; IV edge ${Number.isFinite(ivEdge) ? `${ivEdge >= 0 ? "+" : ""}${ivEdge.toFixed(2)} volatility points` : "unavailable"}; ${varianceCopy}; ${gammaCopy}; vega-normalized price edge ${Number.isFinite(variance.vegaNormalizedEdge) ? `${variance.vegaNormalizedEdge >= 0 ? "+" : ""}${variance.vegaNormalizedEdge.toFixed(2)} vol points` : "unavailable"}; signal ${variance.candidateSide}; ${historyCopy}; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend/carry input ${effectiveDividend.toFixed(2)}%.${alertCopy}`;
     }
   }
 

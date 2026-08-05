@@ -3,14 +3,18 @@
 from .engine import (
     ForecastConfig,
     VolatilityResearchEngine,
+    diagnose_models_by_moneyness,
     evaluate_forecasts,
     latest_forecast_payload,
     rank_option_contracts,
 )
+from .surface import add_volatility_surface_context
 
 __all__ = [
     "ForecastConfig",
     "VolatilityResearchEngine",
+    "add_volatility_surface_context",
+    "diagnose_models_by_moneyness",
     "evaluate_forecasts",
     "latest_forecast_payload",
     "rank_option_contracts",

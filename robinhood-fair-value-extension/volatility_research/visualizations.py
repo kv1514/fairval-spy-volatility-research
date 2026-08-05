@@ -154,7 +154,7 @@ def write_visualizations(
     chart2 = _scatter_chart("Forecast vs future realized volatility", x2, y2, "Forecast volatility (%)", "Future realized volatility (%)")
 
     model_errors = evaluation[evaluation["model"] == "best_model"].sort_values("horizon") if not evaluation.empty else pd.DataFrame()
-    chart3 = _bar_chart("Model error by horizon", model_errors.get("horizon", pd.Series(dtype=str)).astype(str), model_errors.get("mae", pd.Series(dtype=float)).to_numpy(float), "MAE (volatility points)")
+    chart3 = _bar_chart("Model variance error by horizon", model_errors.get("horizon", pd.Series(dtype=str)).astype(str), model_errors.get("mse_variance", pd.Series(dtype=float)).to_numpy(float), "MSE of annualized variance")
 
     if not lambda_performance.empty:
         latest_date = lambda_performance["date"].max()

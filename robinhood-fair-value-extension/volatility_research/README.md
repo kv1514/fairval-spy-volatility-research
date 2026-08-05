@@ -16,7 +16,11 @@ Annualized realized volatility is expressed in percent. The engine evaluates hor
 - `fixed_blend`, with variance weights `0.40, 0.30, 0.20, 0.10`
 - `optimized_blend`, with nonnegative variance weights that sum to one
 - `ewma`, with lambda selected from a coarse `0.70..0.99` grid and a `0.001` fine grid around the coarse winner
-- `best_model`, selected by past walk-forward MAE for that ticker and horizon
+- `best_model`, selected by past out-of-sample variance MSE for that ticker and horizon:
+
+```text
+mean(((forecast_vol / 100)^2 - (future_realized_vol / 100)^2)^2)
+```
 
 The `h=1` sample standard deviation is undefined. The implementation uses the standard one-day realized-volatility proxy `abs(next_return) * sqrt(252)` for that target. Horizons above one use sample standard deviation (`ddof=1`) over exactly the next `h` returns.
 
@@ -48,6 +52,8 @@ ticker,date,expiration,dte,option_type,strike,market_iv,bid,ask,volume,open_inte
 
 Optional option columns are `market_mid`, `rate`, and `dividend`. `market_iv` may be decimal (`0.20`) or percent (`20`); auto-detection treats a column median at or below `1.5` as decimal, so unusually high decimal-IV datasets should be converted to percent explicitly. Rate and dividend inputs are explicitly percent (`4.25`, not `0.0425`). If `market_mid` is absent, bid/ask midpoint is used.
 
+Historical surface context uses the same option schema and is supplied with `--surface-history`. Percentiles are computed only from dates strictly before the ranked contract, grouped by ticker, option type, DTE bucket, and log-moneyness bucket. Calls and puts are separate so normal downside put skew is not automatically labeled rich volatility.
+
 ## Run
 
 From the extension directory:
@@ -56,6 +62,7 @@ From the extension directory:
 python -m volatility_research.cli `
   --prices data/robinhood-daily-2022-2026.csv `
   --options data/robinhood-options-snapshot-2026-08-05.csv `
+  --surface-history data/spy-option-surface-history-2026.csv `
   --output-dir volatility-research-output `
   --min-train 30 `
   --training-window 252 `
@@ -68,7 +75,9 @@ Use `--training-window 0` for expanding rather than rolling training. The comman
 - `evaluation.csv`: MAE, RMSE, variance MSE, and directional accuracy when timestamp-aligned market IV history is supplied
 - `option_rankings.csv`: required contract DataFrame plus executable-edge and liquidity fields
 - `ewma_lambda_performance.csv`, `blend_weights_history.csv`, and `model_selection_history.csv`
+- `model_diagnostics.csv`: optimized blend, EWMA, realized-20, and realized-60 variance errors by ticker, horizon, and available moneyness bucket
 - `latest_forecasts.json`: compact `volatility_forecast.v1` bridge for the Chrome extension
+- `variance_diagnostics_report.html`: standalone diagnostics and current research queue
 - six SVG charts and a local `visualizations/index.html` dashboard
 
 ## Extension bridge
@@ -84,8 +93,16 @@ The ranking table includes:
 ```text
 ticker, date, expiration, dte, option_type, strike, market_iv,
 forecast_vol, vol_edge, market_mid, model_fair_value,
-market_iv_fair_value, price_edge, bid, ask, spread_pct, volume,
-open_interest, model_used, lambda_used, weights_used
+market_iv_fair_value, price_edge, implied_variance, forecast_variance,
+variance_edge, dollar_gamma, gamma_weighted_edge, vega_normalized_edge,
+bid, ask, spread_pct, volume, open_interest, model_used, lambda_used,
+weights_used
 ```
 
-Additional fields include `edge_after_bid_ask`, `liquidity_pass`, `composite_score`, `research_bucket`, and `contract_rank`. These are prioritization aids for further validation, not buy/sell signals.
+The Haugh short-option/delta-hedge approximation is:
+
+```text
+P&L ≈ 0.5 * S^2 * gamma * (implied_variance - realized_variance) * T
+```
+
+`gamma_weighted_edge` uses market-IV gamma and annualized decimal variance. Its positive sign supports short-vol research; the long-vol sign is the inverse. The ranking also includes ATM IV, contract IV minus ATM, skew slope, 1/2/5/10D term fields, historical IV percentile, `edge_after_bid_ask`, liquidity gates, and the matched historical bucket. These are research prioritization aids, not trade instructions.

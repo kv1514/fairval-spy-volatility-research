@@ -1,7 +1,8 @@
 {
   "schema": "volatility_forecast.v1",
-  "generated_at": "2026-08-05T19:43:19.795015+00:00",
+  "generated_at": "2026-08-05T22:11:32.075553+00:00",
   "volatility_unit": "annualized_percent",
+  "variance_unit": "annualized_decimal_squared",
   "horizons": [
     1,
     2,
@@ -14,146 +15,234 @@
       "ticker": "SPY",
       "as_of_date": "2026-08-04",
       "horizon": 3,
-      "forecast_vol": 15.512614458646713,
-      "model_used": "optimized_blend",
-      "lambda_used": null,
-      "weights_used": {
-        "5": 0.13506088104113473,
-        "10": 1.6653345369377348e-16,
-        "20": 1.6653345369377348e-16,
-        "60": 0.8649391189588649
-      }
+      "forecast_vol": 20.33504712725346,
+      "model_used": "ewma",
+      "lambda_used": 0.792,
+      "weights_used": null
     },
     {
       "ticker": "SPY",
       "as_of_date": "2026-08-04",
       "horizon": 2,
-      "forecast_vol": 14.86327762095766,
-      "model_used": "optimized_blend",
-      "lambda_used": null,
-      "weights_used": {
-        "5": 0.06395143495016915,
-        "10": 0.0,
-        "20": 0.0,
-        "60": 0.9360485650498309
-      }
+      "forecast_vol": 20.136994466358146,
+      "model_used": "ewma",
+      "lambda_used": 0.8,
+      "weights_used": null
     },
     {
       "ticker": "SPY",
       "as_of_date": "2026-08-04",
       "horizon": 1,
-      "forecast_vol": 15.268826128892258,
+      "forecast_vol": 17.798543133895006,
       "model_used": "ewma",
-      "lambda_used": 0.954,
+      "lambda_used": 0.879,
       "weights_used": null
     },
     {
       "ticker": "QQQ",
       "as_of_date": "2026-08-04",
       "horizon": 5,
-      "forecast_vol": 27.743589488266572,
+      "forecast_vol": 28.350202753516168,
       "model_used": "ewma",
-      "lambda_used": 0.95,
+      "lambda_used": 0.937,
       "weights_used": null
     },
     {
       "ticker": "SPX",
       "as_of_date": "2026-08-04",
       "horizon": 10,
-      "forecast_vol": 14.069183811423533,
-      "model_used": "realized_60",
-      "lambda_used": null,
+      "forecast_vol": 14.310213041909886,
+      "model_used": "ewma",
+      "lambda_used": 0.988,
       "weights_used": null
     },
     {
       "ticker": "SPX",
       "as_of_date": "2026-08-04",
       "horizon": 5,
-      "forecast_vol": 14.069183811423533,
-      "model_used": "realized_60",
-      "lambda_used": null,
+      "forecast_vol": 16.266618882029412,
+      "model_used": "ewma",
+      "lambda_used": 0.919,
       "weights_used": null
     },
     {
       "ticker": "SPX",
       "as_of_date": "2026-08-04",
       "horizon": 3,
-      "forecast_vol": 14.069183811423533,
-      "model_used": "realized_60",
-      "lambda_used": null,
-      "weights_used": null
-    },
-    {
-      "ticker": "SPX",
-      "as_of_date": "2026-08-04",
-      "horizon": 2,
-      "forecast_vol": 14.069183811423533,
-      "model_used": "realized_60",
-      "lambda_used": null,
-      "weights_used": null
-    },
-    {
-      "ticker": "SPX",
-      "as_of_date": "2026-08-04",
-      "horizon": 1,
-      "forecast_vol": 14.984524763988066,
+      "forecast_vol": 20.800839362600033,
       "model_used": "ewma",
-      "lambda_used": 0.957,
+      "lambda_used": 0.772,
+      "weights_used": null
+    },
+    {
+      "ticker": "SPX",
+      "as_of_date": "2026-08-04",
+      "horizon": 2,
+      "forecast_vol": 20.30253833343621,
+      "model_used": "ewma",
+      "lambda_used": 0.793,
+      "weights_used": null
+    },
+    {
+      "ticker": "SPX",
+      "as_of_date": "2026-08-04",
+      "horizon": 1,
+      "forecast_vol": 17.720087506000546,
+      "model_used": "ewma",
+      "lambda_used": 0.879,
       "weights_used": null
     },
     {
       "ticker": "QQQ",
       "as_of_date": "2026-08-04",
       "horizon": 1,
-      "forecast_vol": 26.767246314489036,
-      "model_used": "realized_60",
-      "lambda_used": null,
+      "forecast_vol": 29.235316247110067,
+      "model_used": "ewma",
+      "lambda_used": 0.916,
       "weights_used": null
     },
     {
       "ticker": "QQQ",
       "as_of_date": "2026-08-04",
       "horizon": 2,
-      "forecast_vol": 26.191061984138177,
-      "model_used": "realized_20",
-      "lambda_used": null,
+      "forecast_vol": 32.804943907825105,
+      "model_used": "ewma",
+      "lambda_used": 0.835,
       "weights_used": null
     },
     {
       "ticker": "SPY",
       "as_of_date": "2026-08-04",
       "horizon": 5,
-      "forecast_vol": 15.2097154360309,
+      "forecast_vol": 15.970800906099672,
       "model_used": "ewma",
-      "lambda_used": 0.956,
+      "lambda_used": 0.932,
       "weights_used": null
     },
     {
       "ticker": "QQQ",
       "as_of_date": "2026-08-04",
       "horizon": 3,
-      "forecast_vol": 26.191061984138177,
-      "model_used": "realized_20",
-      "lambda_used": null,
+      "forecast_vol": 32.32540078612585,
+      "model_used": "ewma",
+      "lambda_used": 0.846,
       "weights_used": null
     },
     {
       "ticker": "QQQ",
       "as_of_date": "2026-08-04",
       "horizon": 10,
-      "forecast_vol": 26.767246314489036,
-      "model_used": "realized_60",
-      "lambda_used": null,
+      "forecast_vol": 23.799433952708064,
+      "model_used": "ewma",
+      "lambda_used": 0.986,
       "weights_used": null
     },
     {
       "ticker": "SPY",
       "as_of_date": "2026-08-04",
       "horizon": 10,
-      "forecast_vol": 14.254062919633084,
-      "model_used": "realized_60",
-      "lambda_used": null,
+      "forecast_vol": 14.542366556069547,
+      "model_used": "ewma",
+      "lambda_used": 0.99,
       "weights_used": null
+    }
+  ],
+  "surface_benchmarks": [
+    {
+      "ticker": "SPY",
+      "option_type": "call",
+      "dte_bucket": 1,
+      "moneyness_bucket": "atm",
+      "observations": 202,
+      "p10": 4.830407256923615,
+      "p25": 9.796491591939702,
+      "p50": 14.73816216647625,
+      "p75": 18.826175095397048,
+      "p90": 23.229674407798797
+    },
+    {
+      "ticker": "SPY",
+      "option_type": "call",
+      "dte_bucket": 2,
+      "moneyness_bucket": "atm",
+      "observations": 128,
+      "p10": 11.779254367921501,
+      "p25": 13.653009367161431,
+      "p50": 16.48946806535125,
+      "p75": 20.408174360189587,
+      "p90": 24.435218405144287
+    },
+    {
+      "ticker": "SPY",
+      "option_type": "call",
+      "dte_bucket": 3,
+      "moneyness_bucket": "atm",
+      "observations": 131,
+      "p10": 11.454540904313326,
+      "p25": 12.77696131202392,
+      "p50": 15.296787610659376,
+      "p75": 17.664022551300008,
+      "p90": 19.56342626661993
+    },
+    {
+      "ticker": "SPY",
+      "option_type": "call",
+      "dte_bucket": 5,
+      "moneyness_bucket": "atm",
+      "observations": 99,
+      "p10": 10.728745842652396,
+      "p25": 13.361288416916503,
+      "p50": 16.40517201978713,
+      "p75": 18.80782747631427,
+      "p90": 20.489181785251947
+    },
+    {
+      "ticker": "SPY",
+      "option_type": "put",
+      "dte_bucket": 1,
+      "moneyness_bucket": "atm",
+      "observations": 209,
+      "p10": 5.3447161370813845,
+      "p25": 9.880138052999971,
+      "p50": 14.996158505324274,
+      "p75": 19.74935597769916,
+      "p90": 25.816918171763422
+    },
+    {
+      "ticker": "SPY",
+      "option_type": "put",
+      "dte_bucket": 2,
+      "moneyness_bucket": "atm",
+      "observations": 122,
+      "p10": 11.505741667123512,
+      "p25": 12.758152930312786,
+      "p50": 15.930570680415254,
+      "p75": 19.873552809618413,
+      "p90": 23.397898168215523
+    },
+    {
+      "ticker": "SPY",
+      "option_type": "put",
+      "dte_bucket": 3,
+      "moneyness_bucket": "atm",
+      "observations": 130,
+      "p10": 11.855396102376284,
+      "p25": 13.383349610492587,
+      "p50": 15.972631160626188,
+      "p75": 19.494515827931465,
+      "p90": 21.63199082038924
+    },
+    {
+      "ticker": "SPY",
+      "option_type": "put",
+      "dte_bucket": 5,
+      "moneyness_bucket": "atm",
+      "observations": 99,
+      "p10": 11.125924718379974,
+      "p25": 13.100553578808903,
+      "p50": 15.016053951568905,
+      "p75": 17.0075699136639,
+      "p90": 18.920065573930742
     }
   ]
 }

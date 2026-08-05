@@ -1,5 +1,5 @@
 const DEFAULTS = {
-  settingsVersion: 5,
+  settingsVersion: 6,
   enabled: true,
   ivSource: "surface",
   volatility: 20,
@@ -58,7 +58,8 @@ function showForecastStatus(payload) {
   }
   const tickers = [...new Set(payload.records.map((record) => String(record.ticker || "").toUpperCase()).filter(Boolean))];
   const latest = payload.records.map((record) => String(record.as_of_date || "")).sort().at(-1);
-  status.textContent = `${payload.records.length} forecasts · ${tickers.join(", ")} · latest ${latest || "unknown"}`;
+  const buckets = Array.isArray(payload.surface_benchmarks) ? payload.surface_benchmarks.length : 0;
+  status.textContent = `${payload.records.length} forecasts · ${buckets} historical IV buckets · ${tickers.join(", ")} · latest ${latest || "unknown"}`;
 }
 
 chrome.storage.sync.get(null, (saved) => {
@@ -92,7 +93,7 @@ chrome.storage.sync.get(null, (saved) => {
 });
 
 chrome.storage.local.get({
-  paperStudyV1: { version: 2, records: [] },
+  paperStudyV1: { version: 3, records: [] },
   volatilityForecastV1: { schema: "volatility_forecast.v1", records: [] },
 }, ({ paperStudyV1, volatilityForecastV1 }) => {
   showPaperStatus(paperStudyV1);
@@ -167,7 +168,7 @@ document.getElementById("apply").addEventListener("click", () => {
 });
 
 document.getElementById("exportPaper").addEventListener("click", () => {
-  chrome.storage.local.get({ paperStudyV1: { version: 2, records: [] } }, ({ paperStudyV1 }) => {
+  chrome.storage.local.get({ paperStudyV1: { version: 3, records: [] } }, ({ paperStudyV1 }) => {
     const blob = new Blob([JSON.stringify(paperStudyV1, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -180,6 +181,6 @@ document.getElementById("exportPaper").addEventListener("click", () => {
 
 document.getElementById("clearPaper").addEventListener("click", () => {
   if (!confirm("Clear all locally recorded paper observations?")) return;
-  const empty = { version: 2, records: [], updatedAt: Date.now(), outcomes15m: null, outcomes60m: null };
+  const empty = { version: 3, records: [], updatedAt: Date.now(), outcomes15m: null, outcomes60m: null };
   chrome.storage.local.set({ paperStudyV1: empty }, () => showPaperStatus(empty));
 });

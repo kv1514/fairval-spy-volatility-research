@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Robinhood Fair Value Overlay",
-  "version": "1.4.0",
-  "description": "Overlays walk-forward volatility forecasts, market IV edges, and research-only option pricing diagnostics.",
+  "version": "1.5.0",
+  "description": "Overlays walk-forward variance forecasts, Haugh gamma-weighted edges, and skew-aware option research diagnostics.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://home.treasury.gov/*"],
   "action": {

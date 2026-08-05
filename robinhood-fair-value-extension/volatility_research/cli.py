@@ -11,11 +11,13 @@ import pandas as pd
 from .engine import (
     ForecastConfig,
     VolatilityResearchEngine,
+    diagnose_models_by_moneyness,
     evaluate_forecasts,
     json_safe_frame,
     latest_forecast_payload,
     rank_option_contracts,
 )
+from .reports import write_variance_diagnostics_report
 from .visualizations import write_visualizations
 
 
@@ -23,6 +25,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Walk-forward volatility forecasts and option mispricing research")
     parser.add_argument("--prices", required=True, help="CSV with ticker,date,close")
     parser.add_argument("--options", help="Optional CSV of dated option quotes")
+    parser.add_argument("--surface-history", help="Optional historical option IV CSV for DTE/moneyness percentiles")
     parser.add_argument("--output-dir", default="volatility-research-output")
     parser.add_argument("--min-train", type=int, default=30)
     parser.add_argument("--training-window", type=int, default=252, help="Completed targets kept in each training window; 0 means expanding")
@@ -44,14 +47,21 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     engine = VolatilityResearchEngine(config)
     forecasts = engine.fit_predict(prices)
     options = pd.read_csv(args.options) if args.options else pd.DataFrame()
+    surface_history = pd.read_csv(args.surface_history) if args.surface_history else pd.DataFrame()
     market_iv = options[["ticker", "date", "dte", "market_iv"]].copy() if not options.empty else None
     evaluation = evaluate_forecasts(forecasts, market_iv=market_iv, horizons=config.horizons)
     rankings = rank_option_contracts(
         options,
         forecasts,
+        surface_history=surface_history,
         minimum_volume=args.min_volume,
         minimum_open_interest=args.min_open_interest,
     ) if not options.empty else pd.DataFrame()
+    diagnostics = diagnose_models_by_moneyness(
+        forecasts,
+        option_history=surface_history if not surface_history.empty else None,
+        horizons=config.horizons,
+    )
 
     paths = {
         "forecasts": output / "forecasts.csv",
@@ -60,6 +70,8 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
         "lambda_curve": output / "ewma_lambda_performance.csv",
         "weights": output / "blend_weights_history.csv",
         "model_selection": output / "model_selection_history.csv",
+        "diagnostics": output / "model_diagnostics.csv",
+        "diagnostics_report": output / "variance_diagnostics_report.html",
         "latest_json": output / "latest_forecasts.json",
     }
     json_safe_frame(forecasts).to_csv(paths["forecasts"], index=False)
@@ -68,9 +80,16 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     json_safe_frame(engine.lambda_performance_).to_csv(paths["lambda_curve"], index=False)
     json_safe_frame(engine.weights_history_).to_csv(paths["weights"], index=False)
     json_safe_frame(engine.model_selection_history_).to_csv(paths["model_selection"], index=False)
+    diagnostics.to_csv(paths["diagnostics"], index=False)
     paths["latest_json"].write_text(
-        json.dumps(latest_forecast_payload(forecasts), indent=2),
+        json.dumps(latest_forecast_payload(
+            forecasts,
+            surface_history=surface_history if not surface_history.empty else None,
+        ), indent=2),
         encoding="utf-8",
+    )
+    write_variance_diagnostics_report(
+        paths["diagnostics_report"], diagnostics, rankings, forecast_rows=len(forecasts),
     )
     write_visualizations(output / "visualizations", forecasts, evaluation, engine.lambda_performance_, engine.weights_history_, rankings)
     return paths

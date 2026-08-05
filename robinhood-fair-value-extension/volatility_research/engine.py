@@ -10,7 +10,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from .black_scholes import black_scholes_price
+from .black_scholes import black_scholes_greeks, black_scholes_price
+from .surface import add_volatility_surface_context, prepare_surface_contracts, surface_benchmark_records
 
 
 TRADING_DAYS = 252.0
@@ -305,8 +306,11 @@ class VolatilityResearchEngine:
                     training = _training_rows(panel.iloc[:position], origin, self.config)
                     rebalance = position % max(self.config.rebalance_every, 1) == 0
                     if rebalance and len(training) >= self.config.min_train_observations:
+                        target_variance = np.square(training["target_future_vol"] / 100.0)
                         model_errors = {
-                            model: float(np.mean(np.abs(training[model] - training["target_future_vol"])))
+                            model: float(np.mean(np.square(
+                                np.square(training[model] / 100.0) - target_variance,
+                            )))
                             for model in MODEL_NAMES
                         }
                         last_model = min(model_errors, key=model_errors.get)
@@ -316,7 +320,7 @@ class VolatilityResearchEngine:
                             "date": origin,
                             "horizon": int(horizon),
                             "model": model,
-                            "training_mae": error,
+                            "training_mse_variance": error,
                             "selected": model == last_model,
                             "parameter_train_end": last_model_train_end,
                             "n_train": len(training),
@@ -414,6 +418,62 @@ def evaluate_forecasts(
     ).fillna({"directional_observations": 0})
 
 
+def diagnose_models_by_moneyness(
+    forecasts: pd.DataFrame,
+    option_history: pd.DataFrame | None = None,
+    models: Iterable[str] = ("optimized_blend", "ewma", "realized_20", "realized_60"),
+    horizons: Iterable[int] = DEFAULT_HORIZONS,
+) -> pd.DataFrame:
+    """Compare requested models on out-of-sample variance loss by ticker/horizon/bucket."""
+
+    _validate_columns(
+        forecasts,
+        ("ticker", "date", "horizon", "model", "forecast_vol", "future_realized_vol"),
+        "forecasts",
+    )
+    selected_models = tuple(models)
+    valid = forecasts[
+        forecasts["model"].isin(selected_models)
+        & forecasts["forecast_vol"].notna()
+        & forecasts["future_realized_vol"].notna()
+    ].copy()
+    valid["date"] = pd.to_datetime(valid["date"]).dt.normalize()
+
+    datasets: list[pd.DataFrame] = [valid.assign(moneyness_bucket="all")]
+    if option_history is not None and not option_history.empty:
+        contracts = prepare_surface_contracts(option_history)
+        contracts["horizon"] = contracts["dte"].map(lambda value: nearest_horizon(value, horizons))
+        available = contracts[["ticker", "date", "horizon", "moneyness_bucket"]].drop_duplicates()
+        by_bucket = valid.merge(available, on=["ticker", "date", "horizon"], how="inner")
+        datasets.append(by_bucket)
+    combined = pd.concat(datasets, ignore_index=True)
+    if combined.empty:
+        return pd.DataFrame()
+    combined["vol_error"] = combined["forecast_vol"] - combined["future_realized_vol"]
+    combined["variance_error"] = (
+        np.square(combined["forecast_vol"] / 100.0)
+        - np.square(combined["future_realized_vol"] / 100.0)
+    )
+    diagnostics = combined.groupby(
+        ["ticker", "horizon", "moneyness_bucket", "model"], as_index=False,
+    ).agg(
+        observations=("variance_error", "size"),
+        mse_variance=("variance_error", lambda values: float(np.mean(np.square(values)))),
+        mae_variance=("variance_error", lambda values: float(np.mean(np.abs(values)))),
+        rmse_variance=("variance_error", lambda values: float(np.sqrt(np.mean(np.square(values))))),
+        mae_vol=("vol_error", lambda values: float(np.mean(np.abs(values)))),
+        rmse_vol=("vol_error", lambda values: float(np.sqrt(np.mean(np.square(values))))),
+    )
+    group_columns = ["ticker", "horizon", "moneyness_bucket"]
+    best = diagnostics.loc[
+        diagnostics.groupby(group_columns)["mse_variance"].idxmin(),
+        group_columns + ["model"],
+    ].rename(columns={"model": "best_model"})
+    diagnostics = diagnostics.merge(best, on=group_columns, how="left")
+    diagnostics["is_best"] = diagnostics["model"] == diagnostics["best_model"]
+    return diagnostics.sort_values(group_columns + ["mse_variance"]).reset_index(drop=True)
+
+
 def _forecast_lookup(forecasts: pd.DataFrame) -> dict[tuple[str, int], pd.DataFrame]:
     best = forecasts[forecasts["model"] == "best_model"].copy()
     best["date"] = pd.to_datetime(best["date"]).dt.normalize()
@@ -427,6 +487,7 @@ def rank_option_contracts(
     options: pd.DataFrame,
     forecasts: pd.DataFrame,
     prices: pd.DataFrame | None = None,
+    surface_history: pd.DataFrame | None = None,
     horizons: Iterable[int] = DEFAULT_HORIZONS,
     max_spread_percent: float = 20.0,
     minimum_volume: int = 10,
@@ -462,6 +523,10 @@ def rank_option_contracts(
         spot["date"] = pd.to_datetime(spot["date"]).dt.normalize()
         ranked = ranked.merge(spot.rename(columns={"close": "spot"}), on=["ticker", "date"], how="left")
     ranked["spot"] = pd.to_numeric(ranked["spot"], errors="coerce")
+    if "contract_multiplier" not in ranked:
+        ranked["contract_multiplier"] = 100.0
+    ranked["contract_multiplier"] = pd.to_numeric(ranked["contract_multiplier"], errors="coerce").fillna(100.0)
+    ranked = add_volatility_surface_context(ranked, history=surface_history)
 
     lookup = _forecast_lookup(forecasts)
     selected_rows: list[pd.Series | None] = []
@@ -490,12 +555,45 @@ def rank_option_contracts(
         ranked["rate"], ranked["dividend"], ranked["option_type"],
     )
     ranked["price_edge"] = ranked["model_fair_value"] - ranked["market_mid"]
+    ranked["implied_variance"] = np.square(ranked["market_iv"] / 100.0)
+    ranked["forecast_variance"] = np.square(ranked["forecast_vol"] / 100.0)
+    # Haugh equation (24) uses implied variance minus realized variance for the
+    # short-option + delta-hedge P&L sign convention.
+    ranked["variance_edge"] = ranked["implied_variance"] - ranked["forecast_variance"]
+    greeks = black_scholes_greeks(
+        ranked["spot"], ranked["strike"], ranked["dte"], ranked["market_iv"],
+        ranked["rate"], ranked["dividend"],
+    )
+    ranked["gamma"] = greeks["gamma"]
+    ranked["vega"] = greeks["vega"]
+    ranked["dollar_gamma"] = 0.5 * np.square(ranked["spot"]) * ranked["gamma"]
+    ranked["gamma_weighted_edge"] = (
+        ranked["dollar_gamma"] * ranked["variance_edge"] * greeks["time_years"]
+    )
+    ranked["gamma_weighted_edge_contract"] = (
+        ranked["gamma_weighted_edge"] * ranked["contract_multiplier"]
+    )
+    ranked["vega_normalized_edge"] = np.where(
+        ranked["vega"] > 1e-12,
+        ranked["price_edge"] / ranked["vega"],
+        np.nan,
+    )
     ranked["spread_pct"] = np.where(
         ranked["market_mid"] > 0,
         (ranked["ask"] - ranked["bid"]) / ranked["market_mid"] * 100.0,
         np.inf,
     )
     ranked["research_direction"] = np.where(ranked["price_edge"] >= 0, "below-model", "above-model")
+    ranked["candidate_side"] = np.select(
+        [
+            (ranked["price_edge"] > 0) & (ranked["forecast_vol"] > ranked["market_iv"]),
+            (ranked["price_edge"] < 0) & (ranked["market_iv"] > ranked["forecast_vol"]),
+            ranked["price_edge"] > 0,
+            ranked["price_edge"] < 0,
+        ],
+        ["long_vol", "short_vol", "mixed_long_price", "mixed_short_price"],
+        default="neutral",
+    )
     ranked["edge_after_bid_ask"] = np.where(
         ranked["price_edge"] >= 0,
         ranked["model_fair_value"] - ranked["ask"],
@@ -514,22 +612,54 @@ def rank_option_contracts(
         & (ranked["market_mid"] >= 0.10)
     )
     ranked["liquidity_score"] = np.log1p(ranked["volume"].clip(lower=0)) + 0.5 * np.log1p(ranked["open_interest"].clip(lower=0))
+    ranked["surface_context_pass"] = np.select(
+        [
+            (ranked["candidate_side"] == "long_vol") & (ranked["iv_percentile"] <= 40.0),
+            (ranked["candidate_side"] == "short_vol") & (ranked["iv_percentile"] >= 60.0),
+        ],
+        [True, True],
+        default=False,
+    ).astype(bool)
+    ranked["surface_context_status"] = np.select(
+        [
+            ranked["iv_percentile"].isna(),
+            ranked["surface_context_pass"],
+        ],
+        ["historical bucket unavailable", "confirmed relative to historical bucket"],
+        default="not extreme versus historical bucket",
+    )
     ranked["abs_price_edge"] = ranked["price_edge"].abs()
     ranked["abs_vol_edge"] = ranked["vol_edge"].abs()
+    ranked["abs_gamma_weighted_edge"] = ranked["gamma_weighted_edge"].abs()
     grouped = ranked.groupby(["ticker", "date"], group_keys=False)
     ranked["price_edge_score"] = grouped["abs_price_edge"].rank(pct=True)
     ranked["vol_edge_score"] = grouped["abs_vol_edge"].rank(pct=True)
     ranked["executable_edge_score"] = grouped["edge_after_bid_ask"].rank(pct=True)
     ranked["liquidity_rank_score"] = grouped["liquidity_score"].rank(pct=True)
+    ranked["gamma_edge_score"] = grouped["abs_gamma_weighted_edge"].rank(pct=True)
+    ranked["surface_context_score"] = np.where(
+        ranked["candidate_side"] == "long_vol",
+        ((50.0 - ranked["iv_percentile"]) / 50.0).clip(lower=0.0, upper=1.0),
+        np.where(
+            ranked["candidate_side"] == "short_vol",
+            ((ranked["iv_percentile"] - 50.0) / 50.0).clip(lower=0.0, upper=1.0),
+            0.0,
+        ),
+    )
+    ranked["surface_context_score"] = ranked["surface_context_score"].fillna(0.0)
     ranked["composite_score"] = (
-        0.35 * ranked["price_edge_score"]
-        + 0.25 * ranked["vol_edge_score"]
-        + 0.30 * ranked["executable_edge_score"]
+        0.25 * ranked["price_edge_score"]
+        + 0.15 * ranked["vol_edge_score"]
+        + 0.25 * ranked["executable_edge_score"]
+        + 0.15 * ranked["gamma_edge_score"]
+        + 0.10 * ranked["surface_context_score"]
         + 0.10 * ranked["liquidity_rank_score"]
     )
     ranked["research_bucket"] = np.select(
         [
-            ranked["liquidity_pass"] & (ranked["edge_after_bid_ask"] > 0) & (ranked["composite_score"] >= 0.80),
+            ranked["liquidity_pass"] & ranked["surface_context_pass"]
+            & ranked["candidate_side"].isin(["long_vol", "short_vol"])
+            & (ranked["edge_after_bid_ask"] > 0) & (ranked["composite_score"] >= 0.80),
             ranked["liquidity_pass"] & (ranked["edge_after_bid_ask"] > 0),
             ranked["liquidity_pass"],
         ],
@@ -545,18 +675,30 @@ def rank_option_contracts(
 
     required_output = [
         "ticker", "date", "expiration", "dte", "option_type", "strike", "market_iv", "forecast_vol",
-        "vol_edge", "market_mid", "model_fair_value", "market_iv_fair_value", "price_edge", "bid", "ask",
+        "vol_edge", "implied_variance", "forecast_variance", "variance_edge", "dollar_gamma",
+        "gamma_weighted_edge", "vega_normalized_edge", "market_mid", "model_fair_value",
+        "market_iv_fair_value", "price_edge", "bid", "ask",
         "spread_pct", "volume", "open_interest", "model_used", "lambda_used", "weights_used",
     ]
     extras = [
         "forecast_as_of", "forecast_horizon", "spot", "rate", "dividend", "research_direction",
         "edge_after_bid_ask", "edge_after_bid_ask_pct", "liquidity_pass", "composite_score",
         "research_bucket", "contract_rank", "future_realized_vol", "direction_correct_vs_market_iv",
+        "gamma", "vega", "gamma_weighted_edge_contract", "contract_multiplier", "candidate_side",
+        "moneyness", "log_moneyness", "moneyness_bucket", "dte_bucket", "atm_iv",
+        "contract_iv_minus_atm_iv", "iv_skew_slope_per_10pct_moneyness",
+        "atm_iv_1d", "atm_iv_2d", "atm_iv_5d", "atm_iv_10d",
+        "term_spread_2d_minus_1d", "term_spread_5d_minus_2d", "term_spread_10d_minus_5d",
+        "iv_percentile", "iv_percentile_observations", "historical_bucket_iv_median",
+        "iv_minus_historical_bucket_median", "surface_context_pass", "surface_context_status",
     ]
     return ranked[required_output + extras].sort_values(["ticker", "date", "contract_rank"]).reset_index(drop=True)
 
 
-def latest_forecast_payload(forecasts: pd.DataFrame) -> dict:
+def latest_forecast_payload(
+    forecasts: pd.DataFrame,
+    surface_history: pd.DataFrame | None = None,
+) -> dict:
     _validate_columns(forecasts, ("ticker", "date", "horizon", "model", "forecast_vol", "model_used"), "forecasts")
     best = forecasts[forecasts["model"] == "best_model"].copy()
     best["date"] = pd.to_datetime(best["date"]).dt.normalize()
@@ -576,8 +718,10 @@ def latest_forecast_payload(forecasts: pd.DataFrame) -> dict:
         "schema": "volatility_forecast.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "volatility_unit": "annualized_percent",
+        "variance_unit": "annualized_decimal_squared",
         "horizons": sorted({int(record["horizon"]) for record in records}),
         "records": records,
+        "surface_benchmarks": surface_benchmark_records(surface_history) if surface_history is not None else [],
     }
 
 
