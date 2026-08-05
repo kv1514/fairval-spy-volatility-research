@@ -47,6 +47,62 @@ test("parses the visible Robinhood option-chain fields", () => {
   );
 });
 
+test("parses Robinhood's exact expanded Mark and displayed IV", () => {
+  const quote = core.parseExpandedContract(`
+SPY $775 Call 8/5
+Bid
+$1.10 × 14
+Mark
+$1.13
+High
+$1.79
+Last trade
+$1.15
+Volume
+91,963
+Ask
+$1.15 × 128
+Previous close
+$0.03
+Low
+$0.03
+Implied volatility
+20.35%
+Open interest
+2,886
+The Greeks
+Delta
+0.2848
+`);
+  assert.deepEqual(
+    { ...quote },
+    {
+      ticker: "SPY",
+      seriesTicker: "SPY",
+      strike: 775,
+      optionType: "call",
+      expirationLabel: "8/5",
+      bid: 1.1,
+      mark: 1.13,
+      ask: 1.15,
+      iv: 20.35,
+    },
+  );
+});
+
+test("fair-smile interpolation excludes the contract's own noisy IV", () => {
+  const iv = core.smoothedVolatility(
+    105,
+    [
+      { strike: 100, iv: 20 },
+      { strike: 105, iv: 40 },
+      { strike: 110, iv: 30 },
+    ],
+    105,
+  );
+  assert.equal(iv, 25);
+});
+
 test("uses the New York option close for intraday expiry", () => {
   const days = core.daysToExpiration("2026-08-04", Date.parse("2026-08-04T20:00:00Z"));
   assert.ok(Math.abs(days - 15 / 1440) < 1e-9);

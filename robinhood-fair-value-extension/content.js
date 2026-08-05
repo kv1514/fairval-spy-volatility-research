@@ -172,17 +172,26 @@
       (point) => Number.isFinite(point.strike) && Number.isFinite(point.iv) && point.iv >= 1 && point.iv <= 300,
     );
     if (!valid.length) return null;
-    const sortedStrikes = [...new Set(valid.map((point) => point.strike))].sort((a, b) => a - b);
-    const spacings = sortedStrikes.slice(1).map((value, index) => value - sortedStrikes[index]);
-    const typicalSpacing = spacings.length
-      ? spacings.sort((a, b) => a - b)[Math.floor(spacings.length / 2)]
-      : Math.max(Number(spot) * 0.005, 1);
-    const bandwidth = Math.max(typicalSpacing * 3, Number(spot) * 0.008, 1);
+    const lower = valid
+      .filter((point) => point.strike < strike)
+      .sort((a, b) => b.strike - a.strike)[0];
+    const upper = valid
+      .filter((point) => point.strike > strike)
+      .sort((a, b) => a.strike - b.strike)[0];
+    if (lower && upper) {
+      const fraction = (strike - lower.strike) / (upper.strike - lower.strike);
+      return lower.iv + fraction * (upper.iv - lower.iv);
+    }
+
+    const neighbors = valid
+      .filter((point) => point.strike !== strike)
+      .sort((a, b) => Math.abs(a.strike - strike) - Math.abs(b.strike - strike))
+      .slice(0, 3);
+    if (!neighbors.length) return valid[0].iv;
     let weightedVolatility = 0;
     let totalWeight = 0;
-    for (const point of valid) {
-      const scaledDistance = Math.abs(point.strike - strike) / bandwidth;
-      const weight = 1 / (1 + scaledDistance ** 4);
+    for (const point of neighbors) {
+      const weight = 1 / Math.max(Math.abs(point.strike - strike), Number(spot) * 0.0001, 0.01);
       weightedVolatility += point.iv * weight;
       totalWeight += weight;
     }
@@ -353,6 +362,33 @@
     return match ? Number(match[1]) : null;
   }
 
+  function parseExpandedContract(value) {
+    const text = String(value || "").replace(/\r/g, "");
+    const heading = text.match(/^([A-Z.^-]+)\s+\$([0-9,]+(?:\.[0-9]+)?)\s+(Call|Put)\s+(\d{1,2}\/\d{1,2})\s*$/im);
+    if (!heading || heading.index == null) return null;
+    const block = text.slice(heading.index, heading.index + 1800);
+    const readMoney = (label) => {
+      const match = block.match(new RegExp(`${label}\\s*\\$([0-9,]+(?:\\.[0-9]+)?)`, "i"));
+      return match ? Number(match[1].replace(/,/g, "")) : null;
+    };
+    const iv = extractSelectedIv(block);
+    const seriesTicker = heading[1].replace(/^\^/, "").toUpperCase();
+    const strike = Number(heading[2].replace(/,/g, ""));
+    const mark = readMoney("Mark");
+    if (![strike, mark, iv].every(Number.isFinite)) return null;
+    return {
+      ticker: seriesTicker === "SPXW" ? "SPX" : seriesTicker,
+      seriesTicker,
+      strike,
+      optionType: heading[3].toLowerCase(),
+      expirationLabel: heading[4],
+      bid: readMoney("Bid"),
+      mark,
+      ask: readMoney("Ask"),
+      iv,
+    };
+  }
+
   function formatMoney(value) {
     return `$${Number(value).toFixed(2)}`;
   }
@@ -374,6 +410,7 @@
     interpolateTreasuryRate,
     newYorkSettlement,
     parseExpirationLabel,
+    parseExpandedContract,
     parseExtendedHoursChange,
     parseHeading,
     parseMoney,
@@ -391,6 +428,9 @@
   let renderQueued = false;
   let renderTimer;
   let treasuryCurve = FALLBACK_TREASURY_CURVE;
+  let exactQuotes = new Map();
+  let exactQuoteChainKey = "";
+  let scanRunning = false;
 
   async function refreshTreasuryCurve() {
     const year = new Date().getUTCFullYear();
@@ -449,6 +489,104 @@
     };
   }
 
+  function exactQuoteKey(context, strike) {
+    return `${context.ticker}|${context.optionType}|${context.expiration}|${Number(strike).toFixed(4)}`;
+  }
+
+  function quoteFromRow(row) {
+    return parseExpandedContract(row?.parentElement?.innerText || "");
+  }
+
+  function cacheExpandedQuote(context, row) {
+    const quote = quoteFromRow(row);
+    if (!quote || quote.ticker !== context.ticker || quote.optionType !== context.optionType) return null;
+    const cached = { ...quote, capturedAt: Date.now() };
+    exactQuotes.set(exactQuoteKey(context, quote.strike), cached);
+    return cached;
+  }
+
+  function captureExpandedQuotes(context) {
+    const rows = [...context.grid.querySelectorAll('[data-testid^="ChainTableRow-"]')];
+    return rows.map((row) => cacheExpandedQuote(context, row)).filter(Boolean);
+  }
+
+  function waitForExpandedQuote(context, strike, timeout = 1600) {
+    return new Promise((resolve) => {
+      const startedAt = Date.now();
+      const poll = () => {
+        const row = [...context.grid.querySelectorAll('[data-testid^="ChainTableRow-"]')].find((candidate) => {
+          const candidateStrike = parseMoney(
+            candidate.querySelector('[data-testid="OptionChainStrikePriceCell"]')?.textContent || "",
+          );
+          return candidateStrike != null && Math.abs(candidateStrike - strike) < 0.0001;
+        });
+        const quote = cacheExpandedQuote(context, row);
+        if (quote && Math.abs(quote.strike - strike) < 0.0001) {
+          resolve(quote);
+          return;
+        }
+        if (Date.now() - startedAt >= timeout) {
+          resolve(null);
+          return;
+        }
+        setTimeout(poll, 50);
+      };
+      poll();
+    });
+  }
+
+  async function scanVisibleExactQuotes() {
+    if (scanRunning) return;
+    const context = pageContext();
+    if (!context) return;
+    const chainKey = `${context.ticker}|${context.optionType}|${context.expiration}`;
+    if (chainKey !== exactQuoteChainKey) {
+      exactQuoteChainKey = chainKey;
+      exactQuotes = new Map();
+    }
+    scanRunning = true;
+    const button = ensurePanel().querySelector("#bsfv-scan-exact");
+    button.disabled = true;
+    const initialRows = [...context.grid.querySelectorAll('[data-testid^="ChainTableRow-"]')];
+    const originallyExpanded = new Set(
+      initialRows.map((row) => quoteFromRow(row)?.strike).filter(Number.isFinite),
+    );
+    const strikes = initialRows
+      .map((row) => ({
+        strike: parseMoney(row.querySelector('[data-testid="OptionChainStrikePriceCell"]')?.textContent || ""),
+        price: parseMoney(textWithoutOverlay(row.querySelector('[data-testid="OptionChainValidPriceCell"]'))),
+      }))
+      .filter((contract) => Number.isFinite(contract.strike) && Number.isFinite(contract.price))
+      .map((contract) => contract.strike);
+
+    try {
+      for (let index = 0; index < strikes.length; index += 1) {
+        const strike = strikes[index];
+        button.textContent = `SCANNING MARK IV ${index + 1}/${strikes.length}`;
+        const row = [...context.grid.querySelectorAll('[data-testid^="ChainTableRow-"]')].find((candidate) => {
+          const candidateStrike = parseMoney(
+            candidate.querySelector('[data-testid="OptionChainStrikePriceCell"]')?.textContent || "",
+          );
+          return candidateStrike != null && Math.abs(candidateStrike - strike) < 0.0001;
+        });
+        const strikeCell = row?.querySelector('[data-testid="OptionChainStrikePriceCell"]');
+        if (!strikeCell) continue;
+        if (originallyExpanded.has(strike)) {
+          cacheExpandedQuote(context, row);
+          continue;
+        }
+        strikeCell.click();
+        const quote = await waitForExpandedQuote(context, strike);
+        if (quote) strikeCell.click();
+      }
+    } finally {
+      scanRunning = false;
+      button.disabled = false;
+      button.textContent = "SCAN VISIBLE MARK IVs";
+      scheduleRender();
+    }
+  }
+
   function removeBadges() {
     document.querySelectorAll("[data-bsfv-overlay]").forEach((element) => element.remove());
     document.querySelectorAll("[data-bsfv-cell]").forEach((element) => element.removeAttribute("data-bsfv-cell"));
@@ -490,6 +628,7 @@
         </div>
         <label class="bsfv-check"><input id="bsfv-auto-rate" type="checkbox"> Auto Treasury curve by expiration</label>
         <label class="bsfv-check"><input id="bsfv-auto-dividend" type="checkbox"> Auto ticker dividends by expiration</label>
+        <button id="bsfv-scan-exact" type="button">SCAN VISIBLE MARK IVs</button>
         <p id="bsfv-status">Waiting for Robinhood’s visible chain…</p>
         <p class="bsfv-disclaimer">Relative-value screen only · no orders · Treasury rate fetch only</p>
       </div>`;
@@ -532,6 +671,7 @@
       chrome.storage.sync.set({ autoDividend: settings.autoDividend });
       scheduleRender();
     });
+    panel.querySelector("#bsfv-scan-exact").addEventListener("click", scanVisibleExactQuotes);
     return panel;
   }
 
@@ -550,6 +690,14 @@
     panel.querySelector("#bsfv-dividend").disabled = settings.autoDividend;
     panel.querySelector("#bsfv-auto-rate").checked = settings.autoRate;
     panel.querySelector("#bsfv-auto-dividend").checked = settings.autoDividend;
+    const scanButton = panel.querySelector("#bsfv-scan-exact");
+    if (!scanRunning) {
+      const exactCount = details.exactCount ?? 0;
+      const totalRows = details.totalRows ?? 0;
+      scanButton.textContent = totalRows > 0
+        ? `SCAN VISIBLE MARK IVs (${exactCount}/${totalRows})`
+        : "SCAN VISIBLE MARK IVs";
+    }
 
     const contextLine = panel.querySelector("#bsfv-context");
     const statusLine = panel.querySelector("#bsfv-status");
@@ -563,17 +711,18 @@
       : `spot ${formatMoney(context.spot)} live`;
     contextLine.textContent = `${context.ticker} ${context.optionType.toUpperCase()} · ${context.expiration} · ${spotCopy}`;
     const ivCopy = settings.ivSource === "surface"
-      ? `smoothed smile from ${details.validIvCount ?? 0}/${details.totalRows ?? 0} visible IVs`
+      ? `neighbor smile from ${details.validIvCount ?? 0}/${details.totalRows ?? 0} visible IVs`
       : settings.ivSource === "individual"
         ? "individual quote-implied IV (circular at 0 shift)"
         : `manual IV ${Number(settings.volatility).toFixed(2)}%`;
+    const exactCopy = `exact Mark IV ${details.exactCount ?? 0}/${details.totalRows ?? 0}`;
     const rateCopy = settings.autoRate
       ? `r ${Number(details.rate).toFixed(2)}% CMT (${treasuryCurve.date})`
       : `r ${Number(settings.rate).toFixed(2)}% manual`;
     const dividendCopy = settings.autoDividend
       ? `q ${Number(details.dividend).toFixed(2)}% · ${details.dividendModel || "ticker default"}`
       : `q ${Number(settings.dividend).toFixed(2)}% manual`;
-    statusLine.textContent = `${ivCopy} · shift ${Number(settings.ivShift).toFixed(2)}pt · ${rateCopy} · ${dividendCopy}`;
+    statusLine.textContent = `${ivCopy} · ${exactCopy} · shift ${Number(settings.ivShift).toFixed(2)}pt · ${rateCopy} · ${dividendCopy}`;
   }
 
   function render() {
@@ -590,6 +739,13 @@
       syncPanel(null);
       return;
     }
+
+    const chainKey = `${context.ticker}|${context.optionType}|${context.expiration}`;
+    if (chainKey !== exactQuoteChainKey) {
+      exactQuoteChainKey = chainKey;
+      exactQuotes = new Map();
+    }
+    captureExpandedQuotes(context);
 
     const settlementMinutes = context.ticker === "SPX" ? 16 * 60 : 16 * 60 + 15;
     const days = daysToExpiration(context.expiration, Date.now(), settlementMinutes);
@@ -612,14 +768,16 @@
       const strikeCell = row.querySelector('[data-testid="OptionChainStrikePriceCell"]');
       const priceCell = row.querySelector('[data-testid="OptionChainValidPriceCell"]');
       const strike = parseMoney(strikeCell?.textContent || "");
-      const marketPrice = parseMoney(textWithoutOverlay(priceCell));
-      if (!priceCell || strike == null || marketPrice == null || days == null) {
+      const displayedPrice = parseMoney(textWithoutOverlay(priceCell));
+      if (!priceCell || strike == null || displayedPrice == null || days == null) {
         row.querySelector("[data-bsfv-overlay]")?.remove();
         priceCell?.removeAttribute("data-bsfv-cell");
         return null;
       }
-      const marketIv = impliedVolatility({
-        marketPrice,
+      const exactQuote = exactQuotes.get(exactQuoteKey(context, strike));
+      const referencePrice = exactQuote?.mark ?? displayedPrice;
+      const marketIv = exactQuote?.iv ?? impliedVolatility({
+        marketPrice: displayedPrice,
         optionType: context.optionType,
         spot: context.spot,
         strike,
@@ -627,7 +785,7 @@
         rate: effectiveRate,
         dividend: effectiveDividend,
       });
-      return { row, priceCell, strike, marketPrice, marketIv };
+      return { row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv };
     }).filter(Boolean);
     const observations = contracts
       .filter((contract) => contract.marketIv != null)
@@ -638,10 +796,11 @@
       dividendModel: dividendDetails.model,
       validIvCount: observations.length,
       totalRows: contracts.length,
+      exactCount: contracts.filter((contract) => contract.exactQuote).length,
     });
 
     for (const contract of contracts) {
-      const { row, priceCell, strike, marketPrice, marketIv } = contract;
+      const { row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv } = contract;
       const baseIv = settings.ivSource === "manual"
         ? Number(settings.volatility)
         : settings.ivSource === "individual"
@@ -662,7 +821,7 @@
         rate: effectiveRate,
         dividend: effectiveDividend,
       });
-      const difference = fairValue - marketPrice;
+      const difference = fairValue - referencePrice;
       let badge = priceCell.querySelector("[data-bsfv-overlay]");
       if (!badge) {
         badge = document.createElement("span");
@@ -671,12 +830,20 @@
         priceCell.setAttribute("data-bsfv-cell", "true");
         priceCell.appendChild(badge);
       }
-      const marketIvCopy = marketIv == null ? "IV n/a" : `${context.priceHeading.split(" ")[0]} IV ${marketIv.toFixed(1)}%`;
+      const marketIvCopy = marketIv == null
+        ? "IV n/a"
+        : exactQuote
+          ? `RH IV ${marketIv.toFixed(2)}%`
+          : `${context.priceHeading.split(" ")[0]} IV ${marketIv.toFixed(1)}%*`;
       const nextText = `FV ${formatMoney(fairValue)} · ${marketIvCopy}`;
       if (badge.textContent !== nextText) badge.textContent = nextText;
       const comparison = difference >= 0 ? `+${formatMoney(difference)}` : `-${formatMoney(Math.abs(difference))}`;
       badge.dataset.signal = Math.abs(difference) < 0.005 ? "flat" : difference > 0 ? "above" : "below";
-      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus Robinhood ${context.priceHeading.toLowerCase()} ${formatMoney(marketPrice)}. ${context.priceHeading.split(" ")[0]}-implied IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; fair IV ${fairIv.toFixed(2)}%; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend input ${effectiveDividend.toFixed(2)}%.`;
+      const referenceCopy = exactQuote
+        ? `Robinhood mark ${formatMoney(referencePrice)} (displayed ask ${formatMoney(displayedPrice)})`
+        : `Robinhood ${context.priceHeading.toLowerCase()} ${formatMoney(referencePrice)}`;
+      const ivBasisCopy = exactQuote ? "Robinhood displayed" : `${context.priceHeading.split(" ")[0]}-implied estimate`;
+      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus ${referenceCopy}. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; fair IV ${fairIv.toFixed(2)}%; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend input ${effectiveDividend.toFixed(2)}%.`;
     }
   }
 
