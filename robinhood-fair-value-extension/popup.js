@@ -1,4 +1,5 @@
 const DEFAULTS = {
+  settingsVersion: 2,
   enabled: true,
   ivSource: "surface",
   volatility: 20,
@@ -26,7 +27,12 @@ function syncDisabledState() {
   fields.dividend.disabled = fields.autoDividend.checked;
 }
 
-chrome.storage.sync.get(DEFAULTS, (settings) => {
+chrome.storage.sync.get(null, (saved) => {
+  const settings = { ...DEFAULTS, ...saved };
+  if (Number(saved.settingsVersion || 0) < DEFAULTS.settingsVersion) {
+    settings.ivSource = "surface";
+    chrome.storage.sync.set({ ivSource: settings.ivSource, settingsVersion: DEFAULTS.settingsVersion });
+  }
   fields.enabled.checked = settings.enabled;
   fields.ivSource.value = ["surface", "individual", "manual"].includes(settings.ivSource)
     ? settings.ivSource
@@ -46,6 +52,7 @@ fields.autoDividend.addEventListener("change", syncDisabledState);
 
 document.getElementById("apply").addEventListener("click", () => {
   const settings = {
+    settingsVersion: DEFAULTS.settingsVersion,
     enabled: fields.enabled.checked,
     ivSource: ["surface", "individual", "manual"].includes(fields.ivSource.value)
       ? fields.ivSource.value

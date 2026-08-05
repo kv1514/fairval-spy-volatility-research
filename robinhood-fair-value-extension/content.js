@@ -16,6 +16,7 @@
     ],
   };
   const DEFAULT_SETTINGS = {
+    settingsVersion: 2,
     enabled: true,
     ivSource: "surface",
     volatility: 20,
@@ -194,6 +195,28 @@
     return Number.isFinite(parsed) ? parsed : null;
   }
 
+  function parseExtendedHoursChange(value) {
+    const match = String(value || "").match(
+      /([+-])\s*\$([0-9,]+(?:\.[0-9]+)?)\s*\([^)]*\)\s*(After Hours|Pre[- ]?Market)/i,
+    );
+    if (!match) return null;
+    const amount = Number(match[2].replace(/,/g, ""));
+    if (!Number.isFinite(amount)) return null;
+    return (match[1] === "-" ? -1 : 1) * amount;
+  }
+
+  function sessionAlignedSpot(currentSpot, sessionChangeText) {
+    const extendedHoursChange = parseExtendedHoursChange(sessionChangeText);
+    if (!Number.isFinite(currentSpot) || extendedHoursChange == null) {
+      return { spot: currentSpot, liveSpot: currentSpot, basis: "live underlying" };
+    }
+    return {
+      spot: currentSpot - extendedHoursChange,
+      liveSpot: currentSpot,
+      basis: "regular-session close",
+    };
+  }
+
   function parseHeading(value) {
     const match = String(value || "").match(/^([A-Z.^-]+)\s+(buy|sell)\s+(Call|Put)$/i);
     if (!match) return null;
@@ -351,9 +374,11 @@
     interpolateTreasuryRate,
     newYorkSettlement,
     parseExpirationLabel,
+    parseExtendedHoursChange,
     parseHeading,
     parseMoney,
     parseTreasuryXml,
+    sessionAlignedSpot,
     smoothedVolatility,
   };
 
@@ -393,20 +418,30 @@
     const shareButton = [...document.querySelectorAll("button")].find((button) =>
       /^(Share|Index) price:/i.test((button.textContent || "").replace(/\s+/g, " ").trim()),
     );
+    const equityPrice = document.querySelector('#sdp-market-price [aria-label]');
     const indexPrice = document.querySelector('[data-testid="IndexDetailPage-PriceSection"] [aria-label]');
-    const spot = parseMoney(shareButton?.textContent || indexPrice?.getAttribute("aria-label") || "");
+    const currentSpot = parseMoney(
+      equityPrice?.getAttribute("aria-label") ||
+      indexPrice?.getAttribute("aria-label") ||
+      shareButton?.textContent ||
+      "",
+    );
+    const alignedSpot = sessionAlignedSpot(
+      currentSpot,
+      document.querySelector('#sdp-price-chart-price-change')?.textContent || "",
+    );
     const expirationControl = document.querySelector('[aria-label="Expiration Date"]');
     const expiration = parseExpirationLabel(expirationControl?.textContent || "");
     const grid = document.querySelector('[role="grid"]');
-    const selectedIv = extractSelectedIv(grid?.textContent || "");
+    const selectedIv = extractSelectedIv(document.body.innerText || "");
     const priceHeading = [...document.querySelectorAll("h4")]
       .map((element) => (element.textContent || "").replace(/\s+/g, " ").trim())
       .find((text) => /^(Ask|Bid|Mark|Natural) Price$/i.test(text));
 
-    if (spot == null || !expiration || !grid) return null;
+    if (alignedSpot.spot == null || !expiration || !grid) return null;
     return {
       ...heading,
-      spot,
+      ...alignedSpot,
       expiration,
       selectedIv,
       priceHeading: priceHeading || (heading.side === "buy" ? "Ask Price" : "Bid Price"),
@@ -523,7 +558,10 @@
       statusLine.textContent = "No supported chain detected.";
       return;
     }
-    contextLine.textContent = `${context.ticker} ${context.optionType.toUpperCase()} · ${context.expiration} · spot ${formatMoney(context.spot)}`;
+    const spotCopy = context.basis === "regular-session close"
+      ? `option-aligned spot ${formatMoney(context.spot)} close · live ${formatMoney(context.liveSpot)}`
+      : `spot ${formatMoney(context.spot)} live`;
+    contextLine.textContent = `${context.ticker} ${context.optionType.toUpperCase()} · ${context.expiration} · ${spotCopy}`;
     const ivCopy = settings.ivSource === "surface"
       ? `smoothed smile from ${details.validIvCount ?? 0}/${details.totalRows ?? 0} visible IVs`
       : settings.ivSource === "individual"
@@ -633,12 +671,12 @@
         priceCell.setAttribute("data-bsfv-cell", "true");
         priceCell.appendChild(badge);
       }
-      const marketIvCopy = marketIv == null ? "IV n/a" : `IV ${marketIv.toFixed(1)}%`;
+      const marketIvCopy = marketIv == null ? "IV n/a" : `${context.priceHeading.split(" ")[0]} IV ${marketIv.toFixed(1)}%`;
       const nextText = `FV ${formatMoney(fairValue)} · ${marketIvCopy}`;
       if (badge.textContent !== nextText) badge.textContent = nextText;
       const comparison = difference >= 0 ? `+${formatMoney(difference)}` : `-${formatMoney(Math.abs(difference))}`;
       badge.dataset.signal = Math.abs(difference) < 0.005 ? "flat" : difference > 0 ? "above" : "below";
-      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus Robinhood ${context.priceHeading.toLowerCase()} ${formatMoney(marketPrice)}. Quote-implied IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; fair IV ${fairIv.toFixed(2)}%; CMT rate ${effectiveRate.toFixed(2)}%; dividend input ${effectiveDividend.toFixed(2)}%.`;
+      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus Robinhood ${context.priceHeading.toLowerCase()} ${formatMoney(marketPrice)}. ${context.priceHeading.split(" ")[0]}-implied IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; fair IV ${fairIv.toFixed(2)}%; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend input ${effectiveDividend.toFixed(2)}%.`;
     }
   }
 
@@ -654,9 +692,14 @@
       if (saved.treasuryCurve?.points?.length) treasuryCurve = saved.treasuryCurve;
       scheduleRender();
     });
-    chrome.storage.sync.get(DEFAULT_SETTINGS, (saved) => {
+    chrome.storage.sync.get(null, (saved) => {
+      const needsMigration = Number(saved.settingsVersion || 0) < DEFAULT_SETTINGS.settingsVersion;
       settings = { ...DEFAULT_SETTINGS, ...saved };
-      if (!["surface", "individual", "manual"].includes(settings.ivSource)) settings.ivSource = "surface";
+      if (needsMigration || !["surface", "individual", "manual"].includes(settings.ivSource)) {
+        settings.ivSource = "surface";
+        settings.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
+        chrome.storage.sync.set({ ivSource: settings.ivSource, settingsVersion: settings.settingsVersion });
+      }
       ensurePanel();
       syncPanel();
       render();

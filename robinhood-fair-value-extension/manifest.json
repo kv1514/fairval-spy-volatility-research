@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Robinhood Fair Value Overlay",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Adds strike-specific IV-smile fair-value estimates beside live Robinhood option-chain prices.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://home.treasury.gov/*"],

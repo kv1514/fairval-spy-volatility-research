@@ -8,6 +8,7 @@ A local Chrome extension that reads the option chain already visible in Robinhoo
 - Recalculates as Robinhood's virtualized option chain updates.
 - Inverts each visible quote to calculate that contract's own market-implied volatility.
 - Builds a locally smoothed strike-by-strike IV smile for relative fair-value comparisons.
+- When Robinhood displays an extended-hours ETF price beside a frozen option quote, removes the displayed after-hours or pre-market move and uses the regular-session close paired with that quote.
 - Fetches the official U.S. Treasury CMT curve and interpolates a rate for the selected expiration.
 - Uses separate dividend assumptions for SPY, SPX, and QQQ. Short-dated SPY/QQQ expirations include only estimated quarterly dividends occurring before expiry.
 - Makes no brokerage-data requests, does not read account credentials, and cannot place orders. Its only external request is the public Treasury curve.

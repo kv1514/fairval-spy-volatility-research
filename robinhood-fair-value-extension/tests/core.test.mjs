@@ -90,3 +90,28 @@ test("uses expiration-aware ETF dividends and a continuous SPX yield", () => {
   assert.ok(quarterlySpy.yield > 0);
   assert.equal(spx.yield, 1.12);
 });
+
+test("removes extended-hours moves from the spot paired with frozen option quotes", () => {
+  const aligned = core.sessionAlignedSpot(
+    774.38,
+    "+$13.61 (+1.80%) Today+$3.10 (+0.40%) After Hours",
+  );
+  assert.ok(Math.abs(aligned.spot - 771.28) < 1e-9);
+  assert.equal(aligned.basis, "regular-session close");
+  assert.equal(core.parseExtendedHoursChange("-$1.25 (-0.16%) Pre-Market"), -1.25);
+
+  const days = core.daysToExpiration(
+    "2026-08-05",
+    Date.parse("2026-08-05T05:32:16.089Z"),
+  );
+  const iv = core.impliedVolatility({
+    marketPrice: 1.15,
+    optionType: "call",
+    spot: aligned.spot,
+    strike: 775,
+    days,
+    rate: 3.78,
+    dividend: 0,
+  });
+  assert.ok(Math.abs(iv - 20.42) < 0.03);
+});
