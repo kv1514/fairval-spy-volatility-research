@@ -1,4 +1,6 @@
-# Simulation Results — v1.2.1
+# Synthetic Simulation Results — v1.3.0
+
+These results validate formula inversion and anomaly-screen implementation, not profitability. Version 1.3.0 adds a separate 264-contract Robinhood trade-bar replay; that replay did not find a profitable threshold. See [ROBINHOOD_REPLAY_RESULTS.md](ROBINHOOD_REPLAY_RESULTS.md).
 
 ## Outcome
 

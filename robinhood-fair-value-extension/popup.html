@@ -13,12 +13,13 @@
       <label>IV source
         <select id="ivSource">
           <option value="surface">Smoothed market smile</option>
+          <option value="forecast">Own forecast + market skew</option>
           <option value="individual">Individual market IV</option>
-          <option value="manual">Manual IV</option>
+          <option value="manual">Flat own-vol forecast</option>
         </select>
       </label>
       <div class="grid">
-        <label>Manual IV %<input id="volatility" type="number" min="0.01" max="500" step="0.1"></label>
+        <label>Forecast ATM IV %<input id="volatility" type="number" min="0.01" max="500" step="0.1"></label>
         <label>Fair-IV shift pt<input id="ivShift" type="number" min="-100" max="100" step="0.1"></label>
       </div>
       <label class="enabled compact"><span>Auto Treasury rate curve</span><input id="autoRate" type="checkbox"></label>
@@ -30,7 +31,15 @@
         <label>Minimum edge %<input id="gapThreshold" type="number" min="1" max="100" step="1"></label>
         <label>Maximum spread %<input id="maxSpreadPercent" type="number" min="1" max="100" step="1"></label>
       </div>
+      <label class="enabled compact"><span>Continuous Mark/IV refresh</span><input id="autoScan" type="checkbox"></label>
+      <label>Refresh interval seconds<input id="autoScanIntervalSeconds" type="number" min="15" max="300" step="5"></label>
+      <label class="enabled compact"><span>Record paper outcomes locally</span><input id="paperRecording" type="checkbox"></label>
       <button id="apply" type="button">Apply to Robinhood</button>
+      <div class="grid">
+        <button id="exportPaper" class="secondary" type="button">Export paper data</button>
+        <button id="clearPaper" class="secondary" type="button">Clear paper data</button>
+      </div>
+      <p id="paperStatus" role="status">No paper observations yet.</p>
       <p id="message" role="status">Calculations stay on your device.</p>
     </main>
     <script src="popup.js"></script>

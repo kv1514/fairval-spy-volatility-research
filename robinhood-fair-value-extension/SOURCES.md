@@ -1,6 +1,6 @@
 # Model inputs and sources
 
-As of August 4, 2026.
+As of August 5, 2026.
 
 ## Methodology
 
@@ -26,6 +26,14 @@ As of August 4, 2026.
 
 - `Individual market IV` solves for the volatility that reproduces each displayed Robinhood quote. With a zero IV shift, fair value equals that quote by construction.
 - `Smoothed market smile` is the default relative-value screen. It calculates each contract's quote-implied IV, smooths neighboring strike IVs, and prices each strike from that local fair-IV surface.
+- `Own forecast + market skew` replaces the market surface's ATM level with the user's independent realized-volatility forecast while retaining the contemporaneous strike skew. `IV EDGE` is model/fair IV minus the individual contract's market IV.
+- `Flat own-vol forecast` applies the user's independent volatility forecast to every strike and deliberately discards market skew.
 - `Fair-IV shift` is the user's independent volatility view in percentage points. It is the cleanest way to test a bullish or bearish volatility assumption without discarding the observed smile.
+
+## Historical replay data
+
+- Robinhood `get_option_historicals`: fixed hourly trade-price OHLC bars for 264 expired SPY call and put contracts across 12 expirations.
+- Robinhood `get_equity_historicals`: split-adjusted regular-session SPY OHLCV bars aligned to the option timestamps.
+- The returned option history does not contain historical bid/ask or NBBO. The replay therefore uses explicit cost haircuts and is labeled a trade-bar diagnostic, not an executable backtest.
 
 All outputs are model estimates, not trade recommendations.

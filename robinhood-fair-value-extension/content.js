@@ -16,7 +16,7 @@
     ],
   };
   const DEFAULT_SETTINGS = {
-    settingsVersion: 3,
+    settingsVersion: 4,
     enabled: true,
     ivSource: "surface",
     volatility: 20,
@@ -28,8 +28,13 @@
     alertsEnabled: true,
     gapThreshold: 10,
     maxSpreadPercent: 20,
+    autoScan: true,
+    autoScanIntervalSeconds: 30,
+    paperRecording: true,
     collapsed: false,
   };
+  const PAPER_STUDY_VERSION = 2;
+  const PAPER_MIN_SPACING_MS = 15_000;
 
   const normalPdf = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 
@@ -199,6 +204,61 @@
       spreadPercent,
       score: edge / Math.max(spread, 0.01),
     };
+  }
+
+  function computePaperOutcomes(records, horizonMinutes = 60) {
+    const horizonMs = Math.max(Number(horizonMinutes), 1) * 60_000;
+    const toleranceMs = Math.max(horizonMs * 0.5, 2 * 60_000);
+    const grouped = new Map();
+    for (const record of records || []) {
+      if (!record?.contractKey || !Number.isFinite(Number(record.observedAt))) continue;
+      const group = grouped.get(record.contractKey) || [];
+      group.push(record);
+      grouped.set(record.contractKey, group);
+    }
+    const outcomes = [];
+    for (const group of grouped.values()) {
+      group.sort((a, b) => Number(a.observedAt) - Number(b.observedAt));
+      for (let index = 0; index < group.length; index += 1) {
+        const signal = group[index];
+        if (!signal.flagDirection) continue;
+        const target = Number(signal.observedAt) + horizonMs;
+        const outcome = group.slice(index + 1).find((candidate) => {
+          const lag = Number(candidate.observedAt) - target;
+          return lag >= 0 && lag <= toleranceMs;
+        });
+        if (!outcome) continue;
+        const entry = signal.flagDirection === "below-model" ? Number(signal.ask) : Number(signal.bid);
+        const exit = signal.flagDirection === "below-model" ? Number(outcome.bid) : Number(outcome.ask);
+        if (![entry, exit].every(Number.isFinite) || entry <= 0 || exit < 0) continue;
+        const pnl = signal.flagDirection === "below-model" ? exit - entry : entry - exit;
+        outcomes.push({ pnl, direction: signal.flagDirection });
+      }
+    }
+    const mean = outcomes.length
+      ? outcomes.reduce((total, outcome) => total + outcome.pnl, 0) / outcomes.length
+      : null;
+    return {
+      horizonMinutes: Number(horizonMinutes),
+      count: outcomes.length,
+      wins: outcomes.filter((outcome) => outcome.pnl > 0).length,
+      winRate: outcomes.length ? outcomes.filter((outcome) => outcome.pnl > 0).length / outcomes.length : null,
+      meanPnl: mean,
+    };
+  }
+
+  function thinPaperRecords(records, minimumSpacingMs = PAPER_MIN_SPACING_MS) {
+    const ordered = [...new Map((records || []).filter((record) => record?.id).map((record) => [record.id, record])).values()]
+      .sort((a, b) => Number(a.observedAt) - Number(b.observedAt));
+    const lastByContract = new Map();
+    return ordered.filter((record) => {
+      const observedAt = Number(record.observedAt);
+      if (!record.contractKey || !Number.isFinite(observedAt)) return false;
+      const previous = lastByContract.get(record.contractKey);
+      if (Number.isFinite(previous) && observedAt - previous < Number(minimumSpacingMs)) return false;
+      lastByContract.set(record.contractKey, observedAt);
+      return true;
+    });
   }
 
   function interpolateTreasuryRate(points, days) {
@@ -588,6 +648,7 @@
 
   const Core = {
     calculateBlackScholes,
+    computePaperOutcomes,
     assessDiscrepancy,
     chainImpliedCarry,
     daysToExpiration,
@@ -606,6 +667,7 @@
     parseTreasuryXml,
     sessionAlignedSpot,
     smoothedVolatility,
+    thinPaperRecords,
   };
 
   globalThis.__BSFV_CORE__ = Core;
@@ -620,6 +682,12 @@
   let exactQuotes = new Map();
   let exactQuoteChainKey = "";
   let scanRunning = false;
+  let lastAutoScanAt = 0;
+  let autoScanChainKey = "";
+  let paperStudy = { version: PAPER_STUDY_VERSION, records: [], updatedAt: null, outcomes15m: null, outcomes60m: null };
+  let paperWriteRunning = false;
+  let pendingPaperRecords = [];
+  const recordedCaptureTimes = new Map();
 
   async function refreshTreasuryCurve() {
     const year = new Date().getUTCFullYear();
@@ -724,7 +792,7 @@
     });
   }
 
-  async function scanVisibleExactQuotes() {
+  async function scanVisibleExactQuotes({ automatic = false } = {}) {
     if (scanRunning) return;
     const context = pageContext();
     if (!context) return;
@@ -751,7 +819,7 @@
     try {
       for (let index = 0; index < strikes.length; index += 1) {
         const strike = strikes[index];
-        button.textContent = `SCANNING MARK IV ${index + 1}/${strikes.length}`;
+        button.textContent = `${automatic ? "AUTO " : ""}REFRESHING MARK IV ${index + 1}/${strikes.length}`;
         const row = [...context.grid.querySelectorAll('[data-testid^="ChainTableRow-"]')].find((candidate) => {
           const candidateStrike = parseMoney(
             candidate.querySelector('[data-testid="OptionChainStrikePriceCell"]')?.textContent || "",
@@ -770,10 +838,24 @@
       }
     } finally {
       scanRunning = false;
+      lastAutoScanAt = Date.now();
       button.disabled = false;
-      button.textContent = "SCAN VISIBLE MARK IVs";
+      button.textContent = "REFRESH MARK IV NOW";
       scheduleRender();
     }
+  }
+
+  function maybeAutoScan() {
+    if (!settings.enabled || !settings.autoScan || scanRunning || document.hidden) return;
+    const context = pageContext();
+    if (!context) return;
+    const chainKey = `${context.ticker}|${context.optionType}|${context.expiration}`;
+    if (chainKey !== autoScanChainKey) {
+      autoScanChainKey = chainKey;
+      lastAutoScanAt = 0;
+    }
+    const intervalMs = Math.max(Number(settings.autoScanIntervalSeconds) || 30, 15) * 1000;
+    if (Date.now() - lastAutoScanAt >= intervalMs) scanVisibleExactQuotes({ automatic: true });
   }
 
   function removeBadges() {
@@ -798,11 +880,12 @@
           <label class="bsfv-wide">Fair-IV model
             <select id="bsfv-iv-source">
               <option value="surface">Smoothed market smile</option>
+              <option value="forecast">Own forecast + market skew</option>
               <option value="individual">Individual market IV</option>
-              <option value="manual">Manual IV</option>
+              <option value="manual">Flat own-vol forecast</option>
             </select>
           </label>
-          <label>Manual IV
+          <label>Forecast ATM IV
             <span><input id="bsfv-volatility" type="number" min="0.01" max="500" step="0.1"><small>%</small></span>
           </label>
           <label>IV shift
@@ -824,14 +907,16 @@
         <label class="bsfv-check"><input id="bsfv-auto-rate" type="checkbox"> Auto Treasury curve by expiration</label>
         <label class="bsfv-check"><input id="bsfv-auto-dividend" type="checkbox"> Auto ticker dividends by expiration</label>
         <label class="bsfv-check"><input id="bsfv-alerts-enabled" type="checkbox"> Highlight high-confidence research flags</label>
-        <button id="bsfv-scan-exact" type="button">SCAN VISIBLE MARK IVs</button>
+        <label class="bsfv-check"><input id="bsfv-auto-scan" type="checkbox"> Continuously refresh exact Mark/IV every <input id="bsfv-auto-scan-seconds" type="number" min="15" max="300" step="5"> seconds</label>
+        <label class="bsfv-check"><input id="bsfv-paper-recording" type="checkbox"> Record forward paper outcomes locally</label>
+        <button id="bsfv-scan-exact" type="button">REFRESH MARK IV NOW</button>
         <p id="bsfv-status">Waiting for Robinhood’s visible chain…</p>
         <section id="bsfv-alerts" aria-label="Option discrepancy research flags">
           <div><strong>RESEARCH FLAGS</strong><span id="bsfv-alert-count">0</span></div>
           <ol id="bsfv-alert-list"></ol>
-          <p id="bsfv-alert-note">Scan exact Mark IVs to evaluate quote quality.</p>
+          <p id="bsfv-alert-note">Exact Mark IVs refresh automatically while this chain stays open.</p>
         </section>
-        <p class="bsfv-disclaimer">Relative-value screen only · no orders · Treasury rate fetch only</p>
+        <p class="bsfv-disclaimer">Research screen only · no orders · local paper recorder</p>
       </div>`;
     document.documentElement.appendChild(panel);
 
@@ -841,7 +926,7 @@
       syncPanel();
     });
     panel.querySelector("#bsfv-iv-source").addEventListener("change", (event) => {
-      settings.ivSource = ["surface", "individual", "manual"].includes(event.target.value)
+      settings.ivSource = ["surface", "forecast", "individual", "manual"].includes(event.target.value)
         ? event.target.value
         : "surface";
       chrome.storage.sync.set({ ivSource: settings.ivSource });
@@ -879,7 +964,24 @@
       chrome.storage.sync.set({ alertsEnabled: settings.alertsEnabled });
       scheduleRender();
     });
-    panel.querySelector("#bsfv-scan-exact").addEventListener("click", scanVisibleExactQuotes);
+    panel.querySelector("#bsfv-auto-scan").addEventListener("change", (event) => {
+      settings.autoScan = event.target.checked;
+      lastAutoScanAt = 0;
+      chrome.storage.sync.set({ autoScan: settings.autoScan });
+      maybeAutoScan();
+      scheduleRender();
+    });
+    panel.querySelector("#bsfv-auto-scan-seconds").addEventListener("change", (event) => {
+      settings.autoScanIntervalSeconds = Math.min(Math.max(Number(event.target.value) || 30, 15), 300);
+      chrome.storage.sync.set({ autoScanIntervalSeconds: settings.autoScanIntervalSeconds });
+      scheduleRender();
+    });
+    panel.querySelector("#bsfv-paper-recording").addEventListener("change", (event) => {
+      settings.paperRecording = event.target.checked;
+      chrome.storage.sync.set({ paperRecording: settings.paperRecording });
+      scheduleRender();
+    });
+    panel.querySelector("#bsfv-scan-exact").addEventListener("click", () => scanVisibleExactQuotes());
     return panel;
   }
 
@@ -890,7 +992,7 @@
     panel.querySelector("#bsfv-collapse").textContent = settings.collapsed ? "+" : "−";
     panel.querySelector("#bsfv-iv-source").value = settings.ivSource;
     panel.querySelector("#bsfv-volatility").value = String(settings.volatility);
-    panel.querySelector("#bsfv-volatility").disabled = settings.ivSource !== "manual";
+    panel.querySelector("#bsfv-volatility").disabled = !["forecast", "manual"].includes(settings.ivSource);
     panel.querySelector("#bsfv-iv-shift").value = String(settings.ivShift);
     panel.querySelector("#bsfv-rate").value = String(settings.rate);
     panel.querySelector("#bsfv-rate").disabled = settings.autoRate;
@@ -899,6 +1001,10 @@
     panel.querySelector("#bsfv-auto-rate").checked = settings.autoRate;
     panel.querySelector("#bsfv-auto-dividend").checked = settings.autoDividend;
     panel.querySelector("#bsfv-alerts-enabled").checked = settings.alertsEnabled;
+    panel.querySelector("#bsfv-auto-scan").checked = settings.autoScan;
+    panel.querySelector("#bsfv-auto-scan-seconds").value = String(settings.autoScanIntervalSeconds);
+    panel.querySelector("#bsfv-auto-scan-seconds").disabled = !settings.autoScan;
+    panel.querySelector("#bsfv-paper-recording").checked = settings.paperRecording;
     panel.querySelector("#bsfv-gap-threshold").value = String(settings.gapThreshold);
     panel.querySelector("#bsfv-max-spread").value = String(settings.maxSpreadPercent);
     const scanButton = panel.querySelector("#bsfv-scan-exact");
@@ -906,8 +1012,8 @@
       const exactCount = details.exactCount ?? 0;
       const totalRows = details.totalRows ?? 0;
       scanButton.textContent = totalRows > 0
-        ? `SCAN VISIBLE MARK IVs (${exactCount}/${totalRows})`
-        : "SCAN VISIBLE MARK IVs";
+        ? `REFRESH MARK IV NOW (${exactCount}/${totalRows})`
+        : "REFRESH MARK IV NOW";
     }
 
     const contextLine = panel.querySelector("#bsfv-context");
@@ -917,7 +1023,7 @@
       statusLine.textContent = "No supported chain detected.";
       panel.querySelector("#bsfv-alert-count").textContent = "0";
       panel.querySelector("#bsfv-alert-list").replaceChildren();
-      panel.querySelector("#bsfv-alert-note").textContent = "Open a chain and scan exact Mark IVs to evaluate quote quality.";
+      panel.querySelector("#bsfv-alert-note").textContent = "Open a chain; exact Mark IVs will refresh automatically.";
       return;
     }
     const spotCopy = context.basis === "regular-session close"
@@ -926,9 +1032,11 @@
     contextLine.textContent = `${context.ticker} ${context.optionType.toUpperCase()} · ${context.expiration} · ${spotCopy}`;
     const ivCopy = settings.ivSource === "surface"
       ? `neighbor smile from ${details.validIvCount ?? 0}/${details.totalRows ?? 0} visible IVs`
+      : settings.ivSource === "forecast"
+        ? `own ATM forecast ${Number(settings.volatility).toFixed(2)}% + live market skew`
       : settings.ivSource === "individual"
         ? "individual quote-implied IV (circular at 0 shift)"
-        : `manual IV ${Number(settings.volatility).toFixed(2)}%`;
+        : `flat own-vol forecast ${Number(settings.volatility).toFixed(2)}%`;
     const exactCopy = `exact Mark IV ${details.exactCount ?? 0}/${details.totalRows ?? 0}`;
     const rateCopy = settings.autoRate
       ? `r ${Number(details.rate).toFixed(2)}% CMT (${treasuryCurve.date})`
@@ -936,7 +1044,13 @@
     const dividendCopy = settings.autoDividend
       ? `q ${Number(details.dividend).toFixed(2)}% · ${details.dividendModel || "ticker default"}`
       : `q ${Number(settings.dividend).toFixed(2)}% manual`;
-    statusLine.textContent = `${ivCopy} · ${exactCopy} · shift ${Number(settings.ivShift).toFixed(2)}pt · ${rateCopy} · ${dividendCopy}`;
+    const autoCopy = settings.autoScan
+      ? `auto ${Math.max(Number(settings.autoScanIntervalSeconds) || 30, 15)}s`
+      : "auto off";
+    const paperCopy = settings.paperRecording
+      ? `paper ${paperStudy.records?.length || 0} · 60m ${paperStudy.outcomes60m?.count || 0}`
+      : "paper off";
+    statusLine.textContent = `${ivCopy} · ${exactCopy} · ${autoCopy} · ${paperCopy} · shift ${Number(settings.ivShift).toFixed(2)}pt · ${rateCopy} · ${dividendCopy}`;
 
     const alerts = details.alerts || [];
     const alertList = panel.querySelector("#bsfv-alert-list");
@@ -954,12 +1068,76 @@
     } else if (alerts.length) {
       alertNote.textContent = "Candidates for deeper review—not trade recommendations. Fresh exact quotes only.";
     } else if ((details.exactCount ?? 0) < 3) {
-      alertNote.textContent = "Scan exact Mark IVs first; unscanned Ask estimates cannot trigger flags.";
+      alertNote.textContent = "Waiting for the automatic exact Mark/IV refresh; estimates cannot trigger flags.";
     } else if (details.alertInputReady === false) {
       alertNote.textContent = "Carry is not calibrated for this ticker/expiry. Use manual dividend/carry before screening flags.";
     } else {
       alertNote.textContent = "No fresh contract clears the edge, spread, and liquidity gates.";
     }
+  }
+
+  function flushPaperRecords() {
+    if (paperWriteRunning || !pendingPaperRecords.length) return;
+    paperWriteRunning = true;
+    const batch = pendingPaperRecords.splice(0, pendingPaperRecords.length);
+    chrome.storage.local.get({ paperStudyV1: paperStudy }, ({ paperStudyV1 }) => {
+      const combined = [...(paperStudyV1.records || []), ...batch];
+      const deduplicated = thinPaperRecords(combined).slice(-10_000);
+      paperStudy = {
+        version: PAPER_STUDY_VERSION,
+        records: deduplicated,
+        updatedAt: Date.now(),
+        outcomes15m: computePaperOutcomes(deduplicated, 15),
+        outcomes60m: computePaperOutcomes(deduplicated, 60),
+      };
+      chrome.storage.local.set({ paperStudyV1: paperStudy }, () => {
+        paperWriteRunning = false;
+        scheduleRender();
+        flushPaperRecords();
+      });
+    });
+  }
+
+  function queuePaperSnapshots(context, pricedContracts, modelDetails) {
+    if (!settings.paperRecording) return;
+    const next = [];
+    for (const contract of pricedContracts) {
+      const quote = contract.exactQuote;
+      if (!quote || !Number.isFinite(Number(quote.capturedAt))) continue;
+      const contractKey = exactQuoteKey(context, contract.strike);
+      const lastRecordedAt = recordedCaptureTimes.get(contractKey);
+      if (Number.isFinite(lastRecordedAt) && quote.capturedAt - lastRecordedAt < PAPER_MIN_SPACING_MS) continue;
+      recordedCaptureTimes.set(contractKey, quote.capturedAt);
+      next.push({
+        id: `${contractKey}|${quote.capturedAt}`,
+        contractKey,
+        ticker: context.ticker,
+        optionType: context.optionType,
+        expiration: context.expiration,
+        strike: contract.strike,
+        observedAt: quote.capturedAt,
+        spot: context.spot,
+        bid: quote.bid,
+        mark: quote.mark,
+        ask: quote.ask,
+        volume: quote.volume,
+        openInterest: quote.openInterest,
+        marketIv: contract.marketIv,
+        fairIv: contract.fairIv,
+        ivEdge: contract.ivEdge,
+        fairValue: contract.fairValue,
+        flagDirection: contract.alert.flagged ? contract.alert.direction : null,
+        edgePercent: contract.alert.flagged ? contract.alert.edgePercent : null,
+        modelMode: settings.ivSource,
+        forecastAtmIv: ["forecast", "manual"].includes(settings.ivSource) ? Number(settings.volatility) : null,
+        rate: modelDetails.rate,
+        dividend: modelDetails.dividend,
+        days: modelDetails.days,
+      });
+    }
+    if (!next.length) return;
+    pendingPaperRecords.push(...next);
+    flushPaperRecords();
   }
 
   function render() {
@@ -1038,13 +1216,19 @@
     const observations = contracts
       .filter((contract) => contract.marketIv != null)
       .map((contract) => ({ strike: contract.strike, iv: contract.marketIv }));
+    const marketSurfaceAtm = smoothedVolatility(context.spot, observations, context.spot);
     const pricedContracts = contracts.map((contract) => {
       const { row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv } = contract;
+      const surfaceIv = smoothedVolatility(strike, observations, context.spot);
       const baseIv = settings.ivSource === "manual"
         ? Number(settings.volatility)
-        : settings.ivSource === "individual"
-          ? marketIv
-          : smoothedVolatility(strike, observations, context.spot);
+        : settings.ivSource === "forecast"
+          ? Number.isFinite(surfaceIv) && Number.isFinite(marketSurfaceAtm)
+            ? surfaceIv + (Number(settings.volatility) - marketSurfaceAtm)
+            : null
+          : settings.ivSource === "individual"
+            ? marketIv
+            : surfaceIv;
       if (!Number.isFinite(baseIv)) {
         row.querySelector("[data-bsfv-overlay]")?.remove();
         priceCell.removeAttribute("data-bsfv-cell");
@@ -1070,12 +1254,18 @@
             maxSpreadPercent: settings.maxSpreadPercent,
           })
         : { flagged: false };
-      return { ...contract, fairIv, fairValue, difference, alert };
+      const ivEdge = Number.isFinite(marketIv) ? fairIv - marketIv : null;
+      return { ...contract, fairIv, fairValue, difference, ivEdge, alert };
     }).filter(Boolean);
     const alerts = pricedContracts
       .filter((contract) => contract.alert.flagged)
       .map((contract) => ({ ...contract.alert, strike: contract.strike }))
       .sort((a, b) => b.score - a.score);
+    queuePaperSnapshots(context, pricedContracts, {
+      rate: effectiveRate,
+      dividend: effectiveDividend,
+      days,
+    });
     syncPanel(context, {
       rate: effectiveRate,
       dividend: effectiveDividend,
@@ -1090,7 +1280,7 @@
     for (const contract of pricedContracts) {
       const {
         row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv,
-        fairIv, fairValue, difference, alert,
+        fairIv, fairValue, difference, ivEdge, alert,
       } = contract;
       let badge = priceCell.querySelector("[data-bsfv-overlay]");
       if (!badge) {
@@ -1108,7 +1298,10 @@
       const flagCopy = alert.flagged
         ? ` · FLAG ${alert.direction === "below-model" ? "+" : "−"}${alert.edgePercent.toFixed(0)}%`
         : "";
-      const nextText = `FV ${formatMoney(fairValue)} · ${marketIvCopy}${flagCopy}`;
+      const ivEdgeCopy = Number.isFinite(ivEdge)
+        ? ` · IV EDGE ${ivEdge >= 0 ? "+" : ""}${ivEdge.toFixed(1)}pt`
+        : "";
+      const nextText = `FV ${formatMoney(fairValue)} · ${marketIvCopy}${ivEdgeCopy}${flagCopy}`;
       if (badge.textContent !== nextText) badge.textContent = nextText;
       const comparison = difference >= 0 ? `+${formatMoney(difference)}` : `-${formatMoney(Math.abs(difference))}`;
       badge.dataset.signal = Math.abs(difference) < 0.005 ? "flat" : difference > 0 ? "above" : "below";
@@ -1120,7 +1313,7 @@
       const alertCopy = alert.flagged
         ? ` Research flag: ${alert.edgePercent.toFixed(1)}% beyond the executable ${alert.direction === "below-model" ? "ask" : "bid"}, with a ${alert.spreadPercent.toFixed(1)}% spread and ${alert.score.toFixed(1)}× spread coverage. Candidate for review, not a trade recommendation.`
         : "";
-      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus ${referenceCopy}. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; fair IV ${fairIv.toFixed(2)}%; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend/carry input ${effectiveDividend.toFixed(2)}%.${alertCopy}`;
+      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus ${referenceCopy}. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; fair IV ${fairIv.toFixed(2)}%; IV edge ${Number.isFinite(ivEdge) ? `${ivEdge >= 0 ? "+" : ""}${ivEdge.toFixed(2)} volatility points` : "unavailable"}; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend/carry input ${effectiveDividend.toFixed(2)}%.${alertCopy}`;
     }
   }
 
@@ -1132,14 +1325,34 @@
   }
 
   function start() {
-    chrome.storage.local.get({ treasuryCurve: FALLBACK_TREASURY_CURVE }, (saved) => {
+    chrome.storage.local.get({
+      treasuryCurve: FALLBACK_TREASURY_CURVE,
+      paperStudyV1: paperStudy,
+    }, (saved) => {
       if (saved.treasuryCurve?.points?.length) treasuryCurve = saved.treasuryCurve;
+      if (Array.isArray(saved.paperStudyV1?.records)) {
+        const normalized = thinPaperRecords(saved.paperStudyV1.records).slice(-10_000);
+        paperStudy = {
+          version: PAPER_STUDY_VERSION,
+          records: normalized,
+          updatedAt: saved.paperStudyV1.updatedAt || Date.now(),
+          outcomes15m: computePaperOutcomes(normalized, 15),
+          outcomes60m: computePaperOutcomes(normalized, 60),
+        };
+        for (const record of normalized) {
+          const previous = recordedCaptureTimes.get(record.contractKey) || 0;
+          if (Number(record.observedAt) > previous) recordedCaptureTimes.set(record.contractKey, Number(record.observedAt));
+        }
+        if (saved.paperStudyV1.version !== PAPER_STUDY_VERSION || normalized.length !== saved.paperStudyV1.records.length) {
+          chrome.storage.local.set({ paperStudyV1: paperStudy });
+        }
+      }
       scheduleRender();
     });
     chrome.storage.sync.get(null, (saved) => {
       const needsMigration = Number(saved.settingsVersion || 0) < DEFAULT_SETTINGS.settingsVersion;
       settings = { ...DEFAULT_SETTINGS, ...saved };
-      if (!["surface", "individual", "manual"].includes(settings.ivSource)) {
+      if (!["surface", "forecast", "individual", "manual"].includes(settings.ivSource)) {
         settings.ivSource = "surface";
       }
       settings.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
@@ -1148,6 +1361,9 @@
         alertsEnabled: settings.alertsEnabled,
         gapThreshold: settings.gapThreshold,
         maxSpreadPercent: settings.maxSpreadPercent,
+        autoScan: settings.autoScan,
+        autoScanIntervalSeconds: settings.autoScanIntervalSeconds,
+        paperRecording: settings.paperRecording,
       });
       ensurePanel();
       syncPanel();
@@ -1166,11 +1382,14 @@
       observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
       window.addEventListener("popstate", scheduleRender);
       setInterval(scheduleRender, 1000);
+      setInterval(maybeAutoScan, 1000);
+      maybeAutoScan();
       refreshTreasuryCurve();
     });
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === "local" && changes.treasuryCurve?.newValue?.points?.length) {
-        treasuryCurve = changes.treasuryCurve.newValue;
+      if (area === "local") {
+        if (changes.treasuryCurve?.newValue?.points?.length) treasuryCurve = changes.treasuryCurve.newValue;
+        if (Array.isArray(changes.paperStudyV1?.newValue?.records)) paperStudy = changes.paperStudyV1.newValue;
         scheduleRender();
         return;
       }

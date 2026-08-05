@@ -210,6 +210,34 @@ test("only flags executable discrepancies with fresh, liquid, tight quotes", () 
   assert.equal(stale.flagged, false);
 });
 
+test("scores forward paper outcomes at executable bid and ask prices", () => {
+  const start = Date.parse("2026-08-04T17:00:00Z");
+  const records = [
+    { contractKey: "SPY|call|2026-08-07|775", observedAt: start, bid: 1, ask: 1.05, flagDirection: "below-model" },
+    { contractKey: "SPY|call|2026-08-07|775", observedAt: start + 60 * 60_000, bid: 1.25, ask: 1.3 },
+    { contractKey: "SPY|put|2026-08-07|760", observedAt: start, bid: 0.9, ask: 0.95, flagDirection: "above-model" },
+    { contractKey: "SPY|put|2026-08-07|760", observedAt: start + 60 * 60_000, bid: 0.68, ask: 0.72 },
+  ];
+  const outcome = core.computePaperOutcomes(records, 60);
+  assert.equal(outcome.count, 2);
+  assert.equal(outcome.wins, 2);
+  assert.ok(Math.abs(outcome.meanPnl - 0.19) < 1e-12);
+});
+
+test("thins DOM redraw snapshots without dropping later quote samples", () => {
+  const start = Date.parse("2026-08-04T17:00:00Z");
+  const records = [0, 1_000, 14_999, 15_000, 30_000].map((offset) => ({
+    id: `sample-${offset}`,
+    contractKey: "SPY|call|2026-08-07|775",
+    observedAt: start + offset,
+  }));
+  assert.deepEqual(Array.from(core.thinPaperRecords(records), (record) => record.id), [
+    "sample-0",
+    "sample-15000",
+    "sample-30000",
+  ]);
+});
+
 test("parses and interpolates the latest official Treasury curve", () => {
   const xml = `<feed>
     <entry><d:NEW_DATE>2026-08-03T00:00:00</d:NEW_DATE><d:BC_1MONTH>3.79</d:BC_1MONTH><d:BC_3MONTH>3.91</d:BC_3MONTH></entry>

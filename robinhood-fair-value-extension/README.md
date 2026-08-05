@@ -7,7 +7,7 @@ A local Chrome extension that reads any classic single-stock, ETF, or supported-
 - Uses Robinhood's visible ticker, underlying share price, expiration, strike, option type, and displayed price.
 - Recalculates as Robinhood's virtualized option chain updates.
 - Reads Robinhood's exact Mark and displayed IV whenever a contract is expanded, and caches them for that chain.
-- Provides **Scan visible Mark IVs** to expand each rendered strike in sequence and capture Robinhood's exact values without placing or preparing an order.
+- Automatically refreshes every rendered contract's exact Mark/IV every 30 seconds by default. The interval is configurable from 15 to 300 seconds, so no repeated refresh click is required.
 - Uses a clearly starred Ask-implied IV estimate only for rows that have not yet been expanded or scanned.
 - Builds an outlier-resistant local IV smile for relative fair-value comparisons. A contract's own quote is excluded from its fair-IV estimate, and robust local regression reduces contamination from a bad neighboring quote.
 - When Robinhood displays an extended-hours ETF price beside a frozen option quote, removes the displayed after-hours or pre-market move and uses the regular-session close paired with that quote.
@@ -16,6 +16,8 @@ A local Chrome extension that reads any classic single-stock, ETF, or supported-
 - After three or more fresh Mark/IV pairs are scanned on expirations of at least seven days, calibrates a robust chain-implied dividend/carry yield. This avoids assuming that every stock has the same yield.
 - Retains expiration-aware public dividend fallbacks for SPY, SPX, and QQQ. Other tickers use an explicitly labeled 0% fallback until enough exact quotes are scanned; manual dividend input remains available.
 - Highlights only fresh, liquid contracts whose modeled edge extends past the executable ask/bid, clears the configured percentage threshold, and is not explained by a wide spread.
+- Adds an independent **Own forecast + market skew** mode. It shifts the live strike smile so its ATM level equals the user's realized-volatility forecast, then shows the resulting per-contract `IV EDGE` and model price.
+- Records exact quote snapshots and forward 15/60-minute paper outcomes locally. Long-side candidates are scored ask-to-later-bid; sell-side candidates are scored bid-to-later-ask. The popup can export or clear this JSON study.
 - Makes no brokerage-data requests, does not read account credentials, and cannot place orders. Its only external request is the public Treasury curve.
 
 The model is European-style Black–Scholes. Most U.S. single-stock and ETF contracts are American-style, so their values remain approximations even with chain-calibrated carry. SPX options are European-style, but standard AM-settled and SPXW PM-settled series can have different expiration timing that Robinhood's visible chain does not always identify.
@@ -30,13 +32,13 @@ The model is European-style Black–Scholes. Most U.S. single-stock and ETF cont
 
 When updating an already loaded copy, click the extension's **Reload** button on `chrome://extensions`, then refresh Robinhood.
 
-The floating panel appears at the lower left. Click **Scan visible Mark IVs** once after opening a chain to capture the exact Mark and IV for every currently rendered contract. The scan only clicks strike labels to reveal public contract details; it never clicks Robinhood's green `+` order button.
+The floating panel appears at the lower left. Exact Mark/IV scanning starts automatically while a supported chain is open and repeats at the configured interval. **Refresh Mark IV now** remains available for an immediate pass. A scan only clicks strike labels to reveal public contract details; it never clicks Robinhood's green `+` order button.
 
 A small `FV $x.xx` badge is added beside each visible Robinhood price. `RH IV 20.35%` means Robinhood's exact displayed Mark IV was captured. `Ask IV 20.5%*` is an estimated ask-implied IV because that row has not been scanned yet. Hover a badge to see the full price basis.
 
 ## Research flags
 
-The green or red `FLAG` treatment is an idea-generation screen, not a buy/sell instruction. A fresh scanned contract is flagged only when:
+The green or red `FLAG` treatment is an idea-generation screen, not a buy/sell instruction. The historical replay below did **not** establish a profitable rule, so a flag must be treated as a paper-research candidate. A fresh scanned contract is flagged only when:
 
 - the model value remains beyond the ask for a below-model candidate, or beyond the bid for an above-model candidate;
 - that executable edge exceeds the selected **Minimum edge %** and at least half the full bid/ask spread;
@@ -46,13 +48,15 @@ The green or red `FLAG` treatment is an idea-generation screen, not a buy/sell i
 
 For an arbitrary ticker, flags remain disabled until chain-implied carry is calibrated from at least three eligible Mark/IV pairs, or the user turns off automatic dividends and supplies a manual dividend/carry assumption. This prevents an unknown 0% dividend fallback from masquerading as a pricing opportunity.
 
-The panel ranks up to five flags by edge-to-spread coverage. A flag means “review this contract and its assumptions,” not “place this trade.” Rescan before relying on a flag because Robinhood's collapsed rows do not expose continuously updating Mark/IV data.
+The panel ranks up to five flags by edge-to-spread coverage. A flag means “record and review this contract and its assumptions,” not “place this trade.” Automatic refresh keeps the exact quote cache current while the chain remains open.
 
 ## Reading the result
 
-- **Smoothed market smile** is the default relative-value screen. Fair value uses the nearest lower and upper strikes' IVs, linearly interpolated at the contract's strike. Scan the visible rows first to build this from Robinhood's exact Mark IVs instead of ask-derived estimates.
+- **Smoothed market smile** is the default relative-value screen. Fair value uses an outlier-resistant local fit of neighboring strikes and excludes the contract's own IV. Automatic scanning replaces temporary ask-derived estimates with Robinhood's exact Mark IVs.
+- **Own forecast + market skew** is the independent-volatility workflow. Enter your forecast of future ATM realized volatility. The extension preserves the live strike skew while replacing the market's ATM volatility level with your forecast.
 - **Individual market IV** uses each contract's raw quote-implied IV. With a zero IV shift, the model necessarily reproduces the quote used to infer IV; this mode is diagnostic, not an independent fair value.
-- **Manual IV** applies one user-entered volatility to all visible strikes.
+- **Flat own-vol forecast** applies one user-entered volatility to every strike without preserving market skew.
+- **IV EDGE** is fair/model IV minus that contract's market IV. A positive number means the model volatility is higher; a negative number means it is lower.
 - **Fair-IV shift** adds or subtracts volatility points from whichever IV model is selected so you can test your own volatility view.
 - **Minimum edge %** controls how far the model must remain beyond the executable ask or bid before a contract is flagged.
 - **Maximum spread %** rejects illiquid quotes whose spread can explain the apparent discrepancy.
@@ -81,3 +85,15 @@ node tests/simulation.mjs [seed] [chain-count] [formula-case-count]
 ```
 
 The default run covers 5,000 formula inversions and 1,000 synthetic call/put chains across stock prices, expirations, IV smiles, carry rates, spreads, quote noise, and injected 20%–40% mispricings. See [SIMULATION_RESULTS.md](SIMULATION_RESULTS.md) for the latest results and limitations.
+
+## Robinhood historical replay
+
+Run the included fixed Robinhood trade-bar replay with Node.js:
+
+```text
+node tests/robinhood-replay.mjs
+```
+
+The fixture contains 264 expired SPY contracts (132 calls and 132 puts), 12 weekly expirations from May 15 through July 31, 2026, 7,524 hourly option bars, and 636 underlying bars. The first eight expirations select the realized-volatility forecast; the final four are a held-out check. Signals are formed only after an hourly bar completes, use the next bar's first trade as an entry proxy, and are delta-hedged through that next bar.
+
+Neither the relative-smile rule nor the simple 20-day historical-volatility forecast produced a positive held-out result after conservative transaction-cost haircuts. This is useful negative evidence: the extension does not label either rule a proven buying strategy. See [ROBINHOOD_REPLAY_RESULTS.md](ROBINHOOD_REPLAY_RESULTS.md) for the full result and limitations.

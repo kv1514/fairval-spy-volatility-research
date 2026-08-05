@@ -38,6 +38,7 @@
 .bsfv-control-grid small { position: absolute; right: 8px; top: 50%; transform: translateY(-23%); color: #8a9398; font-size: 9px; pointer-events: none; }
 .bsfv-check { display: flex; align-items: center; gap: 7px; margin-top: 11px; color: #59656d; font-size: 10px; }
 .bsfv-check input { accent-color: var(--bsfv-green); }
+#bsfv-auto-scan-seconds { width: 52px; height: 25px; margin-left: auto; padding: 0 5px; border: 1px solid #c8ced2; border-radius: 4px; background: white; color: #18242c; font: 700 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
 #bsfv-scan-exact { width: 100%; height: 32px; margin-top: 11px; border: 1px solid #00a904; border-radius: 5px; background: #edfaef; color: #087610; font: 800 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .03em; cursor: pointer; }
 #bsfv-scan-exact:hover { background: #dcf6e0; }
 #bsfv-scan-exact:disabled { cursor: wait; opacity: .65; }
