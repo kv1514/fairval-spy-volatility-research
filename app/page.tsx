@@ -46,7 +46,7 @@ type DataConnection = {
   provider: "alpaca" | "tradier";
   alpacaKeyId: string;
   alpacaSecretKey: string;
-  alpacaFeed: "indicative" | "opra";
+  alpacaFeed: "auto" | "indicative" | "opra";
   tradierToken: string;
 };
 
@@ -54,7 +54,7 @@ const EMPTY_CONNECTION: DataConnection = {
   provider: "alpaca",
   alpacaKeyId: "",
   alpacaSecretKey: "",
-  alpacaFeed: "indicative",
+  alpacaFeed: "auto",
   tradierToken: "",
 };
 
@@ -133,7 +133,7 @@ export default function Home() {
           ...EMPTY_CONNECTION,
           ...parsed,
           provider: parsed.provider === "tradier" ? "tradier" : "alpaca",
-          alpacaFeed: parsed.alpacaFeed === "opra" ? "opra" : "indicative",
+          alpacaFeed: parsed.alpacaFeed === "opra" ? "opra" : "auto",
         };
         setConnection(restored);
         setConnectionDraft(restored);
@@ -148,10 +148,11 @@ export default function Home() {
     setLoading(true);
     setMarketError("");
     try {
-      const query = new URLSearchParams({ symbol, provider: connection.provider });
+      const activeProvider = symbol === "SPX" && connection.tradierToken ? "tradier" : connection.provider;
+      const query = new URLSearchParams({ symbol, provider: activeProvider });
       if (expiration) query.set("expiration", expiration);
       const headers: Record<string, string> = {};
-      if (connection.provider === "alpaca") {
+      if (activeProvider === "alpaca") {
         if (connection.alpacaKeyId) headers["x-alpaca-key-id"] = connection.alpacaKeyId;
         if (connection.alpacaSecretKey) headers["x-alpaca-secret-key"] = connection.alpacaSecretKey;
         headers["x-alpaca-feed"] = connection.alpacaFeed;
@@ -237,6 +238,11 @@ export default function Home() {
     setExpiration("");
     setSelectedSymbol("");
     setInputs((current) => ({ ...current, dividend: defaultsBySymbol[next].dividend }));
+    if (next === "SPX" && connection.provider === "alpaca" && !connection.tradierToken) {
+      setMarketError("Alpaca does not currently provide SPX index market data. Connect Tradier to load SPX quotes.");
+      setConnectionDraft((current) => ({ ...current, provider: "tradier" }));
+      setConnectOpen(true);
+    }
   };
 
   const chooseType = (type: OptionType) => {
@@ -318,7 +324,7 @@ export default function Home() {
               aria-pressed={item === symbol}
             >
               <strong>{item}</strong>
-              <span>{item === "SPX" ? "INDEX" : "ETF"}</span>
+              <span>{item === "SPX" ? (connection.provider === "alpaca" && !connection.tradierToken ? "NEEDS TRADIER" : "INDEX") : "ETF"}</span>
             </button>
           ))}
         </div>
@@ -353,7 +359,7 @@ export default function Home() {
       {market?.status === "indicative" && (
         <div className="demo-banner">
           <div>
-            <strong>Indicative data—not OPRA</strong>
+            <strong>Indicative data—not Robinhood’s OPRA feed</strong>
             <span>{market.notice}</span>
           </div>
           <button type="button" onClick={() => setConnectOpen(true)}>Change feed</button>
@@ -401,7 +407,7 @@ export default function Home() {
                   <th>Strike</th>
                   <th>Bid</th>
                   <th>Ask</th>
-                  <th>Mid</th>
+                  <th>Mark (mid)</th>
                   <th>IV</th>
                   <th>Quote time</th>
                   <th>Model</th>
@@ -475,7 +481,7 @@ export default function Home() {
           {selected && fairValue != null && (
             <div className="comparison-block">
               <div className="comparison-copy">
-                <span>VS MARKET MIDPOINT</span>
+                <span>VS PROVIDER MARK</span>
                 <strong className={difference >= 0 ? "positive" : "negative"}>
                   {signed(differencePercent)}%
                 </strong>
@@ -495,9 +501,9 @@ export default function Home() {
           )}
 
           <div className="quote-grid">
-            <div><span>BID</span><strong>{selected ? money.format(selected.bid) : "—"}</strong></div>
-            <div><span>ASK</span><strong>{selected ? money.format(selected.ask) : "—"}</strong></div>
-            <div><span>MID</span><strong>{selected ? money.format(marketMid) : "—"}</strong></div>
+            <div><span>SELL / BID</span><strong>{selected ? money.format(selected.bid) : "—"}</strong></div>
+            <div><span>BUY / ASK</span><strong>{selected ? money.format(selected.ask) : "—"}</strong></div>
+            <div><span>MARK / MID</span><strong>{selected ? money.format(marketMid) : "—"}</strong></div>
             <div><span>SPREAD</span><strong>{selected ? money.format(spread) : "—"}</strong></div>
           </div>
 
@@ -572,24 +578,29 @@ export default function Home() {
                 </label>
                 <label className="token-field">
                   <span>OPTIONS FEED</span>
-                  <select value={connectionDraft.alpacaFeed} onChange={(event) => setConnectionDraft((current) => ({ ...current, alpacaFeed: event.target.value === "opra" ? "opra" : "indicative" }))}>
+                  <select value={connectionDraft.alpacaFeed} onChange={(event) => setConnectionDraft((current) => ({ ...current, alpacaFeed: event.target.value === "opra" ? "opra" : event.target.value === "indicative" ? "indicative" : "auto" }))}>
+                    <option value="auto">Auto · OPRA if entitled</option>
                     <option value="indicative">Indicative · Alpaca Basic</option>
                     <option value="opra">OPRA · Algo Trader Plus</option>
                   </select>
                 </label>
+                <p className="provider-note"><strong>Coverage:</strong> SPY and QQQ only. Alpaca says SPX market data is not available yet.</p>
               </div>
             ) : (
-              <label className="token-field">
-                <span>TRADIER PRODUCTION TOKEN</span>
-                <input type="password" value={connectionDraft.tradierToken} onChange={(event) => setConnectionDraft((current) => ({ ...current, tradierToken: event.target.value }))} placeholder="Paste token" autoComplete="off" />
-              </label>
+              <div className="credential-stack">
+                <label className="token-field">
+                  <span>TRADIER PRODUCTION TOKEN</span>
+                  <input type="password" value={connectionDraft.tradierToken} onChange={(event) => setConnectionDraft((current) => ({ ...current, tradierToken: event.target.value }))} placeholder="Paste token" autoComplete="off" />
+                </label>
+                <p className="provider-note"><strong>Coverage:</strong> SPY, SPX, and QQQ.</p>
+              </div>
             )}
             <div className="modal-actions">
               <button className="primary-action" type="button" onClick={connect}>Connect live feed</button>
               {hasSavedCredentials && <button className="text-action" type="button" onClick={disconnect}>Disconnect</button>}
             </div>
             <p className="modal-footnote">
-              Alpaca Basic data is useful for testing but will not exactly match Robinhood. For the closest comparison, use OPRA and compare the same bid/ask timestamp. <a href="https://docs.alpaca.markets/docs/getting-started" target="_blank" rel="noreferrer">Alpaca setup</a>
+              Robinhood can show the natural buy/sell price or the mark. Compare our Ask to Robinhood’s buy price, Bid to its sell price, or Mark to Mark at the same timestamp. <a href="https://docs.alpaca.markets/docs/getting-started" target="_blank" rel="noreferrer">Alpaca setup</a>
             </p>
           </section>
         </div>

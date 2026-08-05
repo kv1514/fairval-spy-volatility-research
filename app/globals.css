@@ -302,6 +302,8 @@ footer p { max-width: 760px; margin: 5px 0 0; font-size: 10px; line-height: 1.5;
 .provider-toggle button:last-child { border-right: 0; }
 .provider-toggle button.active { background: var(--ink); color: white; }
 .credential-stack { display: grid; gap: 14px; }
+.provider-note { margin: 0; padding: 10px 12px; border-left: 2px solid var(--amber); background: #f6eddd; color: #6e634f; font-size: 9px; line-height: 1.5; }
+.provider-note strong { color: var(--ink); }
 .modal-actions { display: flex; align-items: center; gap: 18px; margin-top: 18px; }
 .primary-action { min-height: 42px; padding: 0 18px; border: 0; background: var(--ink); color: white; font-family: var(--mono); font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; cursor: pointer; }
 .primary-action:hover { background: var(--green-dark); }

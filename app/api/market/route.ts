@@ -18,7 +18,17 @@ type Contract = {
 };
 
 type Row = { strike: number; call: Contract | null; put: Contract | null };
-type AlpacaCredentials = { keyId: string; secretKey: string; feed: "opra" | "indicative" };
+type AlpacaFeed = "auto" | "opra" | "indicative";
+type AlpacaCredentials = { keyId: string; secretKey: string; feed: Exclude<AlpacaFeed, "auto"> };
+
+class MarketDataError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
 
 const SYMBOLS = ["SPY", "SPX", "QQQ"] as const;
 const NAMES: Record<string, string> = {
@@ -97,16 +107,19 @@ async function alpacaFetch(path: string, credentials: AlpacaCredentials) {
     } catch {
       // Alpaca occasionally returns an empty error response.
     }
-    if (response.status === 401) throw new Error("Alpaca rejected that key ID or secret key.");
+    if (response.status === 401) throw new MarketDataError("Alpaca rejected that key ID or secret key.", 401);
     if (response.status === 403) {
-      throw new Error(
+      throw new MarketDataError(
         credentials.feed === "opra"
           ? "This Alpaca account does not have OPRA access. Choose Indicative or add the Algo Trader Plus data plan."
           : "This Alpaca account is not entitled to the requested market data.",
+        403,
       );
     }
-    if (response.status === 429) throw new Error("Alpaca rate limit reached. Wait a moment and refresh.");
-    throw new Error(detail || `Alpaca returned ${response.status}.`);
+    if (response.status === 429) {
+      throw new MarketDataError("Alpaca rate limit reached. Wait a moment and refresh.", 429);
+    }
+    throw new MarketDataError(detail || `Alpaca returned ${response.status}.`, response.status);
   }
   return (await response.json()) as Record<string, unknown>;
 }
@@ -147,7 +160,7 @@ async function alpacaResponse(
 ) {
   if (symbol === "SPX") {
     throw new Error(
-      "Alpaca retail market data does not reliably support SPX yet. Use Tradier for SPX, or choose SPY/QQQ with Alpaca.",
+      "Alpaca does not currently provide SPX through its Market Data API. Use Tradier for SPX, or choose SPY/QQQ with Alpaca.",
     );
   }
 
@@ -222,7 +235,7 @@ async function alpacaResponse(
     rows: pairContracts(contracts, spot),
     notice:
       credentials.feed === "indicative"
-        ? "Alpaca Basic uses modified indicative option quotes and IEX underlying data. These can differ from Robinhood's OPRA/SIP prices."
+        ? "Alpaca Basic is a modified indicative feed, not OPRA. Differences from Robinhood and other retail brokers are expected."
         : "Consolidated OPRA option quotes with SIP underlying data.",
   };
 }
@@ -338,14 +351,25 @@ export async function GET(request: Request) {
     const keyId = request.headers.get("x-alpaca-key-id")?.trim() || process.env.ALPACA_API_KEY_ID?.trim();
     const secretKey = request.headers.get("x-alpaca-secret-key")?.trim() || process.env.ALPACA_API_SECRET_KEY?.trim();
     const requestedFeed = request.headers.get("x-alpaca-feed")?.trim() || process.env.ALPACA_FEED?.trim();
-    const feed = requestedFeed === "opra" ? "opra" : "indicative";
+    const feed: AlpacaFeed = requestedFeed === "opra" || requestedFeed === "indicative" ? requestedFeed : "auto";
     if (!keyId || !secretKey) {
       return Response.json(
         { error: "Connect Alpaca keys to load real market data. Sample prices are no longer shown." },
         { status: 401, headers: { "Cache-Control": "no-store" } },
       );
     }
-    return Response.json(await alpacaResponse(symbol, expiration, { keyId, secretKey, feed }), {
+    let payload;
+    if (feed === "auto") {
+      try {
+        payload = await alpacaResponse(symbol, expiration, { keyId, secretKey, feed: "opra" });
+      } catch (error) {
+        if (!(error instanceof MarketDataError) || error.status !== 403) throw error;
+        payload = await alpacaResponse(symbol, expiration, { keyId, secretKey, feed: "indicative" });
+      }
+    } else {
+      payload = await alpacaResponse(symbol, expiration, { keyId, secretKey, feed });
+    }
+    return Response.json(payload, {
       headers: { "Cache-Control": "no-store" },
     });
   } catch (error) {

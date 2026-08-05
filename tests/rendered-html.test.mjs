@@ -47,5 +47,7 @@ test("uses authenticated providers and intraday New York expiry timing", async (
   assert.match(pricing, /settlementMinutes = 16 \* 60 \+ 15/);
   assert.match(page, /No fabricated option prices are shown/);
   assert.match(page, /OPRA · Algo Trader Plus/);
+  assert.match(page, /Auto · OPRA if entitled/);
+  assert.match(page, /NEEDS TRADIER/);
   assert.doesNotMatch(page, /demoResponse|DEMO FEED/);
 });
