@@ -6,7 +6,7 @@
   z-index: 2147483646;
   left: 18px;
   bottom: 18px;
-  width: 296px;
+  width: 336px;
   overflow: hidden;
   border: 1px solid #263640;
   border-radius: 10px;
@@ -28,6 +28,7 @@
 #bsfv-panel-body { padding: 12px; }
 #bsfv-context { margin: 0 0 11px; font-weight: 700; }
 .bsfv-control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.bsfv-control-grid .bsfv-wide { grid-column: 1 / -1; }
 .bsfv-control-grid label { color: var(--bsfv-muted); font-size: 10px; }
 .bsfv-control-grid label > span { position: relative; display: block; margin-top: 4px; }
 .bsfv-control-grid input, .bsfv-control-grid select { width: 100%; height: 32px; margin-top: 4px; padding: 0 25px 0 8px; border: 1px solid #c7cdd1; border-radius: 5px; outline: none; background: white; color: var(--bsfv-ink); font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -47,7 +48,7 @@
   display: inline-flex !important;
   align-items: center;
   justify-content: center;
-  min-width: 58px;
+  min-width: 112px;
   height: 20px;
   margin-left: 7px;
   padding: 0 6px;
@@ -55,7 +56,7 @@
   border-radius: 999px;
   background: #eefaf0;
   color: #087610;
-  font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: nowrap;
   pointer-events: none;
   vertical-align: middle;

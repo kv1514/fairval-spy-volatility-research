@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Robinhood Fair Value Overlay",
-  "version": "1.0.0",
-  "description": "Adds local Black-Scholes fair-value estimates beside live Robinhood option-chain prices.",
+  "version": "1.1.0",
+  "description": "Adds strike-specific IV-smile fair-value estimates beside live Robinhood option-chain prices.",
   "permissions": ["storage", "activeTab"],
+  "host_permissions": ["https://home.treasury.gov/*"],
   "action": {
     "default_title": "Fair Value Overlay",
     "default_popup": "popup.html"
