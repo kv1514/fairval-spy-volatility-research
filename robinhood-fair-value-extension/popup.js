@@ -1,5 +1,5 @@
 const DEFAULTS = {
-  settingsVersion: 2,
+  settingsVersion: 3,
   enabled: true,
   ivSource: "surface",
   volatility: 20,
@@ -8,6 +8,9 @@ const DEFAULTS = {
   rate: 4.3,
   autoDividend: true,
   dividend: 1.1,
+  alertsEnabled: true,
+  gapThreshold: 10,
+  maxSpreadPercent: 20,
 };
 
 const fields = {
@@ -19,6 +22,9 @@ const fields = {
   rate: document.getElementById("rate"),
   autoDividend: document.getElementById("autoDividend"),
   dividend: document.getElementById("dividend"),
+  alertsEnabled: document.getElementById("alertsEnabled"),
+  gapThreshold: document.getElementById("gapThreshold"),
+  maxSpreadPercent: document.getElementById("maxSpreadPercent"),
 };
 
 function syncDisabledState() {
@@ -29,10 +35,12 @@ function syncDisabledState() {
 
 chrome.storage.sync.get(null, (saved) => {
   const settings = { ...DEFAULTS, ...saved };
-  if (Number(saved.settingsVersion || 0) < DEFAULTS.settingsVersion) {
-    settings.ivSource = "surface";
-    chrome.storage.sync.set({ ivSource: settings.ivSource, settingsVersion: DEFAULTS.settingsVersion });
-  }
+  if (Number(saved.settingsVersion || 0) < DEFAULTS.settingsVersion) chrome.storage.sync.set({
+    settingsVersion: DEFAULTS.settingsVersion,
+    alertsEnabled: settings.alertsEnabled,
+    gapThreshold: settings.gapThreshold,
+    maxSpreadPercent: settings.maxSpreadPercent,
+  });
   fields.enabled.checked = settings.enabled;
   fields.ivSource.value = ["surface", "individual", "manual"].includes(settings.ivSource)
     ? settings.ivSource
@@ -43,6 +51,9 @@ chrome.storage.sync.get(null, (saved) => {
   fields.rate.value = settings.rate;
   fields.autoDividend.checked = settings.autoDividend;
   fields.dividend.value = settings.dividend;
+  fields.alertsEnabled.checked = settings.alertsEnabled;
+  fields.gapThreshold.value = settings.gapThreshold;
+  fields.maxSpreadPercent.value = settings.maxSpreadPercent;
   syncDisabledState();
 });
 
@@ -63,6 +74,9 @@ document.getElementById("apply").addEventListener("click", () => {
     rate: Number(fields.rate.value) || 0,
     autoDividend: fields.autoDividend.checked,
     dividend: Math.max(0, Number(fields.dividend.value) || 0),
+    alertsEnabled: fields.alertsEnabled.checked,
+    gapThreshold: Math.min(Math.max(Number(fields.gapThreshold.value) || DEFAULTS.gapThreshold, 1), 100),
+    maxSpreadPercent: Math.min(Math.max(Number(fields.maxSpreadPercent.value) || DEFAULTS.maxSpreadPercent, 1), 100),
   };
   chrome.storage.sync.set(settings, async () => {
     const message = document.getElementById("message");

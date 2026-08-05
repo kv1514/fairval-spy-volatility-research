@@ -16,7 +16,7 @@
     ],
   };
   const DEFAULT_SETTINGS = {
-    settingsVersion: 2,
+    settingsVersion: 3,
     enabled: true,
     ivSource: "surface",
     volatility: 20,
@@ -25,6 +25,9 @@
     rate: 4.3,
     autoDividend: true,
     dividend: 1.1,
+    alertsEnabled: true,
+    gapThreshold: 10,
+    maxSpreadPercent: 20,
     collapsed: false,
   };
 
@@ -92,6 +95,108 @@
     }
     const result = (low + high) / 2;
     return Number.isFinite(result) ? result : null;
+  }
+
+  function impliedDividendYield(input) {
+    const target = Number(input.marketPrice);
+    if (!Number.isFinite(target) || target <= 0 || !Number.isFinite(Number(input.volatility))) return null;
+    let low = -30;
+    let high = 50;
+    const lowPrice = optionPrice({ ...input, dividend: low });
+    const highPrice = optionPrice({ ...input, dividend: high });
+    const minimum = Math.min(lowPrice, highPrice);
+    const maximum = Math.max(lowPrice, highPrice);
+    if (target < minimum - 0.015 || target > maximum + 0.015 || Math.abs(highPrice - lowPrice) < 0.02) return null;
+    const increasing = highPrice > lowPrice;
+    for (let iteration = 0; iteration < 80; iteration += 1) {
+      const midpoint = (low + high) / 2;
+      const price = optionPrice({ ...input, dividend: midpoint });
+      if ((increasing && price < target) || (!increasing && price > target)) low = midpoint;
+      else high = midpoint;
+    }
+    const result = (low + high) / 2;
+    return Number.isFinite(result) ? result : null;
+  }
+
+  function median(values) {
+    const sorted = (values || []).filter(Number.isFinite).sort((a, b) => a - b);
+    if (!sorted.length) return null;
+    const midpoint = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[midpoint] : (sorted[midpoint - 1] + sorted[midpoint]) / 2;
+  }
+
+  function chainImpliedCarry({ quotes, optionType, spot, days, rate, now = Date.now() }) {
+    if (!Number.isFinite(days) || days < 7 || !Number.isFinite(spot) || spot <= 0) return null;
+    const candidates = (quotes || []).map((quote) => {
+      const spread = Number(quote.ask) - Number(quote.bid);
+      const spreadPercent = Number(quote.mark) > 0 ? (spread / Number(quote.mark)) * 100 : Number.POSITIVE_INFINITY;
+      const fresh = !Number.isFinite(quote.capturedAt) || now - quote.capturedAt <= 120_000;
+      if (
+        !fresh || !Number.isFinite(quote.strike) || !Number.isFinite(quote.mark) || quote.mark < 0.1 ||
+        !Number.isFinite(quote.iv) || Math.abs(Math.log(quote.strike / spot)) > 0.12 ||
+        !Number.isFinite(spreadPercent) || spreadPercent > 25
+      ) return null;
+      const inferred = impliedDividendYield({
+        marketPrice: quote.mark,
+        optionType,
+        spot,
+        strike: quote.strike,
+        days,
+        volatility: quote.iv,
+        rate,
+      });
+      return Number.isFinite(inferred) && inferred >= -15 && inferred <= 30 ? inferred : null;
+    }).filter(Number.isFinite);
+    if (candidates.length < 3) return null;
+    const center = median(candidates);
+    const deviations = candidates.map((value) => Math.abs(value - center));
+    const mad = median(deviations) || 0.25;
+    const robust = candidates.filter((value) => Math.abs(value - center) <= Math.max(3 * mad, 0.75));
+    const inferredYield = median(robust.length >= 3 ? robust : candidates);
+    if (!Number.isFinite(inferredYield)) return null;
+    return {
+      yield: inferredYield,
+      count: robust.length >= 3 ? robust.length : candidates.length,
+      model: `chain-implied carry from ${robust.length >= 3 ? robust.length : candidates.length} fresh Mark/IV pairs`,
+    };
+  }
+
+  function assessDiscrepancy({
+    fairValue,
+    referencePrice,
+    exactQuote,
+    gapThreshold = 10,
+    maxSpreadPercent = 20,
+    now = Date.now(),
+  }) {
+    const neutral = { flagged: false };
+    if (!exactQuote || !Number.isFinite(fairValue) || !Number.isFinite(referencePrice) || referencePrice < 0.1) return neutral;
+    const bid = Number(exactQuote.bid);
+    const ask = Number(exactQuote.ask);
+    const mark = Number(exactQuote.mark);
+    const ageMs = now - Number(exactQuote.capturedAt || 0);
+    if (![bid, ask, mark].every(Number.isFinite) || ask < bid || ageMs > 120_000) return neutral;
+    const spread = ask - bid;
+    const spreadPercent = mark > 0 ? (spread / mark) * 100 : Number.POSITIVE_INFINITY;
+    const liquid = Number(exactQuote.volume) >= 10 || Number(exactQuote.openInterest) >= 100;
+    if (!liquid || spreadPercent > Number(maxSpreadPercent)) return neutral;
+
+    const belowModel = fairValue > mark;
+    const executionReference = belowModel ? ask : bid;
+    if (executionReference <= 0) return neutral;
+    const edge = belowModel ? fairValue - ask : bid - fairValue;
+    const edgePercent = (edge / executionReference) * 100;
+    if (edge < Math.max(0.05, spread * 0.5) || edgePercent < Number(gapThreshold)) return neutral;
+    return {
+      flagged: true,
+      direction: belowModel ? "below-model" : "above-model",
+      edge,
+      edgePercent,
+      executionReference,
+      spread,
+      spreadPercent,
+      score: edge / Math.max(spread, 0.01),
+    };
   }
 
   function interpolateTreasuryRate(points, days) {
@@ -227,7 +332,7 @@
   }
 
   function parseHeading(value) {
-    const match = String(value || "").match(/^([A-Z.^-]+)\s+(buy|sell)\s+(Call|Put)$/i);
+    const match = String(value || "").match(/^([A-Z0-9.^-]+)\s+(buy|sell)\s+(Call|Put)$/i);
     if (!match) return null;
     const seriesTicker = match[1].replace(/^\^/, "").toUpperCase();
     return {
@@ -333,8 +438,11 @@
 
   function dividendAssumption({ ticker, spot, expiration, days, rate, now = Date.now() }) {
     const annualYield = DIVIDEND_DEFAULTS[ticker] ?? 0;
-    if (ticker === 'SPX' || !['SPY', 'QQQ'].includes(ticker)) {
+    if (ticker === 'SPX') {
       return { yield: annualYield, count: null, model: 'continuous index yield' };
+    }
+    if (!['SPY', 'QQQ'].includes(ticker)) {
+      return { yield: 0, count: null, model: '0% fallback until 3+ Mark/IV pairs are scanned' };
     }
     const settlement = newYorkSettlement(expiration, 16 * 60 + 15);
     const dividendDates = quarterlyDividendDates(ticker, now, settlement);
@@ -364,11 +472,15 @@
 
   function parseExpandedContract(value) {
     const text = String(value || "").replace(/\r/g, "");
-    const heading = text.match(/^([A-Z.^-]+)\s+\$([0-9,]+(?:\.[0-9]+)?)\s+(Call|Put)\s+(\d{1,2}\/\d{1,2})\s*$/im);
+    const heading = text.match(/^([A-Z0-9.^-]+)\s+\$([0-9,]+(?:\.[0-9]+)?)\s+(Call|Put)\s+(\d{1,2}\/\d{1,2})\s*$/im);
     if (!heading || heading.index == null) return null;
     const block = text.slice(heading.index, heading.index + 1800);
     const readMoney = (label) => {
       const match = block.match(new RegExp(`${label}\\s*\\$([0-9,]+(?:\\.[0-9]+)?)`, "i"));
+      return match ? Number(match[1].replace(/,/g, "")) : null;
+    };
+    const readInteger = (label) => {
+      const match = block.match(new RegExp(`${label}\\s*([0-9,]+)`, "i"));
       return match ? Number(match[1].replace(/,/g, "")) : null;
     };
     const iv = extractSelectedIv(block);
@@ -385,6 +497,8 @@
       bid: readMoney("Bid"),
       mark,
       ask: readMoney("Ask"),
+      volume: readInteger("Volume"),
+      openInterest: readInteger("Open interest"),
       iv,
     };
   }
@@ -402,11 +516,14 @@
 
   const Core = {
     calculateBlackScholes,
+    assessDiscrepancy,
+    chainImpliedCarry,
     daysToExpiration,
     dividendAssumption,
     extractSelectedIv,
     formatMoney,
     impliedVolatility,
+    impliedDividendYield,
     interpolateTreasuryRate,
     newYorkSettlement,
     parseExpirationLabel,
@@ -625,11 +742,23 @@
           <label>Manual dividend
             <span><input id="bsfv-dividend" type="number" min="0" max="100" step="0.05"><small>%</small></span>
           </label>
+          <label>Flag edge
+            <span><input id="bsfv-gap-threshold" type="number" min="1" max="100" step="1"><small>%</small></span>
+          </label>
+          <label>Max spread
+            <span><input id="bsfv-max-spread" type="number" min="1" max="100" step="1"><small>%</small></span>
+          </label>
         </div>
         <label class="bsfv-check"><input id="bsfv-auto-rate" type="checkbox"> Auto Treasury curve by expiration</label>
         <label class="bsfv-check"><input id="bsfv-auto-dividend" type="checkbox"> Auto ticker dividends by expiration</label>
+        <label class="bsfv-check"><input id="bsfv-alerts-enabled" type="checkbox"> Highlight high-confidence research flags</label>
         <button id="bsfv-scan-exact" type="button">SCAN VISIBLE MARK IVs</button>
         <p id="bsfv-status">Waiting for Robinhood’s visible chain…</p>
+        <section id="bsfv-alerts" aria-label="Option discrepancy research flags">
+          <div><strong>RESEARCH FLAGS</strong><span id="bsfv-alert-count">0</span></div>
+          <ol id="bsfv-alert-list"></ol>
+          <p id="bsfv-alert-note">Scan exact Mark IVs to evaluate quote quality.</p>
+        </section>
         <p class="bsfv-disclaimer">Relative-value screen only · no orders · Treasury rate fetch only</p>
       </div>`;
     document.documentElement.appendChild(panel);
@@ -652,6 +781,8 @@
       ["bsfv-iv-shift", "ivShift"],
       ["bsfv-rate", "rate"],
       ["bsfv-dividend", "dividend"],
+      ["bsfv-gap-threshold", "gapThreshold"],
+      ["bsfv-max-spread", "maxSpreadPercent"],
     ]) {
       panel.querySelector(`#${id}`).addEventListener("change", (event) => {
         const value = Number(event.target.value);
@@ -669,6 +800,11 @@
     panel.querySelector("#bsfv-auto-dividend").addEventListener("change", (event) => {
       settings.autoDividend = event.target.checked;
       chrome.storage.sync.set({ autoDividend: settings.autoDividend });
+      scheduleRender();
+    });
+    panel.querySelector("#bsfv-alerts-enabled").addEventListener("change", (event) => {
+      settings.alertsEnabled = event.target.checked;
+      chrome.storage.sync.set({ alertsEnabled: settings.alertsEnabled });
       scheduleRender();
     });
     panel.querySelector("#bsfv-scan-exact").addEventListener("click", scanVisibleExactQuotes);
@@ -690,6 +826,9 @@
     panel.querySelector("#bsfv-dividend").disabled = settings.autoDividend;
     panel.querySelector("#bsfv-auto-rate").checked = settings.autoRate;
     panel.querySelector("#bsfv-auto-dividend").checked = settings.autoDividend;
+    panel.querySelector("#bsfv-alerts-enabled").checked = settings.alertsEnabled;
+    panel.querySelector("#bsfv-gap-threshold").value = String(settings.gapThreshold);
+    panel.querySelector("#bsfv-max-spread").value = String(settings.maxSpreadPercent);
     const scanButton = panel.querySelector("#bsfv-scan-exact");
     if (!scanRunning) {
       const exactCount = details.exactCount ?? 0;
@@ -704,6 +843,9 @@
     if (!context) {
       contextLine.textContent = "Open a Robinhood option chain to begin.";
       statusLine.textContent = "No supported chain detected.";
+      panel.querySelector("#bsfv-alert-count").textContent = "0";
+      panel.querySelector("#bsfv-alert-list").replaceChildren();
+      panel.querySelector("#bsfv-alert-note").textContent = "Open a chain and scan exact Mark IVs to evaluate quote quality.";
       return;
     }
     const spotCopy = context.basis === "regular-session close"
@@ -723,6 +865,29 @@
       ? `q ${Number(details.dividend).toFixed(2)}% · ${details.dividendModel || "ticker default"}`
       : `q ${Number(settings.dividend).toFixed(2)}% manual`;
     statusLine.textContent = `${ivCopy} · ${exactCopy} · shift ${Number(settings.ivShift).toFixed(2)}pt · ${rateCopy} · ${dividendCopy}`;
+
+    const alerts = details.alerts || [];
+    const alertList = panel.querySelector("#bsfv-alert-list");
+    const alertNote = panel.querySelector("#bsfv-alert-note");
+    panel.querySelector("#bsfv-alert-count").textContent = String(alerts.length);
+    alertList.replaceChildren();
+    for (const alert of alerts.slice(0, 5)) {
+      const item = document.createElement("li");
+      const direction = alert.direction === "below-model" ? "below model" : "above model";
+      item.textContent = `$${Number(alert.strike).toLocaleString()} ${direction} · ${alert.edgePercent.toFixed(1)}% past ${alert.direction === "below-model" ? "ask" : "bid"} · ${alert.score.toFixed(1)}× spread`;
+      alertList.appendChild(item);
+    }
+    if (!settings.alertsEnabled) {
+      alertNote.textContent = "Research flags are turned off.";
+    } else if (alerts.length) {
+      alertNote.textContent = "Candidates for deeper review—not trade recommendations. Fresh exact quotes only.";
+    } else if ((details.exactCount ?? 0) < 3) {
+      alertNote.textContent = "Scan exact Mark IVs first; unscanned Ask estimates cannot trigger flags.";
+    } else if (details.alertInputReady === false) {
+      alertNote.textContent = "Carry is not calibrated for this ticker/expiry. Use manual dividend/carry before screening flags.";
+    } else {
+      alertNote.textContent = "No fresh contract clears the edge, spread, and liquidity gates.";
+    }
   }
 
   function render() {
@@ -753,16 +918,27 @@
       ? interpolateTreasuryRate(treasuryCurve.points, days)
       : Number(settings.rate);
     const effectiveRate = Number.isFinite(interpolatedRate) ? interpolatedRate : Number(settings.rate);
-    const dividendDetails = settings.autoDividend
-      ? dividendAssumption({
-        ticker: context.ticker,
+    const inferredCarry = settings.autoDividend
+      ? chainImpliedCarry({
+        quotes: [...exactQuotes.values()],
+        optionType: context.optionType,
         spot: context.spot,
-        expiration: context.expiration,
         days,
         rate: effectiveRate,
       })
+      : null;
+    const dividendDetails = settings.autoDividend
+      ? inferredCarry || dividendAssumption({
+          ticker: context.ticker,
+          spot: context.spot,
+          expiration: context.expiration,
+          days,
+          rate: effectiveRate,
+        })
       : { yield: Number(settings.dividend), count: null, model: "manual" };
     const effectiveDividend = dividendDetails.yield;
+    const alertInputReady = !settings.autoDividend || Boolean(inferredCarry) ||
+      Object.prototype.hasOwnProperty.call(DIVIDEND_DEFAULTS, context.ticker);
     const rows = [...context.grid.querySelectorAll('[data-testid^="ChainTableRow-"]')];
     const contracts = rows.map((row) => {
       const strikeCell = row.querySelector('[data-testid="OptionChainStrikePriceCell"]');
@@ -790,16 +966,7 @@
     const observations = contracts
       .filter((contract) => contract.marketIv != null)
       .map((contract) => ({ strike: contract.strike, iv: contract.marketIv }));
-    syncPanel(context, {
-      rate: effectiveRate,
-      dividend: effectiveDividend,
-      dividendModel: dividendDetails.model,
-      validIvCount: observations.length,
-      totalRows: contracts.length,
-      exactCount: contracts.filter((contract) => contract.exactQuote).length,
-    });
-
-    for (const contract of contracts) {
+    const pricedContracts = contracts.map((contract) => {
       const { row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv } = contract;
       const baseIv = settings.ivSource === "manual"
         ? Number(settings.volatility)
@@ -809,7 +976,7 @@
       if (!Number.isFinite(baseIv)) {
         row.querySelector("[data-bsfv-overlay]")?.remove();
         priceCell.removeAttribute("data-bsfv-cell");
-        continue;
+        return null;
       }
       const fairIv = Math.min(Math.max(baseIv + Number(settings.ivShift), 0.01), 500);
       const fairValue = optionPrice({
@@ -822,6 +989,37 @@
         dividend: effectiveDividend,
       });
       const difference = fairValue - referencePrice;
+      const alert = settings.alertsEnabled && alertInputReady
+        ? assessDiscrepancy({
+            fairValue,
+            referencePrice,
+            exactQuote,
+            gapThreshold: settings.gapThreshold,
+            maxSpreadPercent: settings.maxSpreadPercent,
+          })
+        : { flagged: false };
+      return { ...contract, fairIv, fairValue, difference, alert };
+    }).filter(Boolean);
+    const alerts = pricedContracts
+      .filter((contract) => contract.alert.flagged)
+      .map((contract) => ({ ...contract.alert, strike: contract.strike }))
+      .sort((a, b) => b.score - a.score);
+    syncPanel(context, {
+      rate: effectiveRate,
+      dividend: effectiveDividend,
+      dividendModel: dividendDetails.model,
+      validIvCount: observations.length,
+      totalRows: contracts.length,
+      exactCount: contracts.filter((contract) => contract.exactQuote).length,
+      alertInputReady,
+      alerts,
+    });
+
+    for (const contract of pricedContracts) {
+      const {
+        row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv,
+        fairIv, fairValue, difference, alert,
+      } = contract;
       let badge = priceCell.querySelector("[data-bsfv-overlay]");
       if (!badge) {
         badge = document.createElement("span");
@@ -835,15 +1033,22 @@
         : exactQuote
           ? `RH IV ${marketIv.toFixed(2)}%`
           : `${context.priceHeading.split(" ")[0]} IV ${marketIv.toFixed(1)}%*`;
-      const nextText = `FV ${formatMoney(fairValue)} · ${marketIvCopy}`;
+      const flagCopy = alert.flagged
+        ? ` · FLAG ${alert.direction === "below-model" ? "+" : "−"}${alert.edgePercent.toFixed(0)}%`
+        : "";
+      const nextText = `FV ${formatMoney(fairValue)} · ${marketIvCopy}${flagCopy}`;
       if (badge.textContent !== nextText) badge.textContent = nextText;
       const comparison = difference >= 0 ? `+${formatMoney(difference)}` : `-${formatMoney(Math.abs(difference))}`;
       badge.dataset.signal = Math.abs(difference) < 0.005 ? "flat" : difference > 0 ? "above" : "below";
+      badge.dataset.alert = alert.flagged ? alert.direction : "none";
       const referenceCopy = exactQuote
         ? `Robinhood mark ${formatMoney(referencePrice)} (displayed ask ${formatMoney(displayedPrice)})`
         : `Robinhood ${context.priceHeading.toLowerCase()} ${formatMoney(referencePrice)}`;
       const ivBasisCopy = exactQuote ? "Robinhood displayed" : `${context.priceHeading.split(" ")[0]}-implied estimate`;
-      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus ${referenceCopy}. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; fair IV ${fairIv.toFixed(2)}%; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend input ${effectiveDividend.toFixed(2)}%.`;
+      const alertCopy = alert.flagged
+        ? ` Research flag: ${alert.edgePercent.toFixed(1)}% beyond the executable ${alert.direction === "below-model" ? "ask" : "bid"}, with a ${alert.spreadPercent.toFixed(1)}% spread and ${alert.score.toFixed(1)}× spread coverage. Candidate for review, not a trade recommendation.`
+        : "";
+      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus ${referenceCopy}. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; fair IV ${fairIv.toFixed(2)}%; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend/carry input ${effectiveDividend.toFixed(2)}%.${alertCopy}`;
     }
   }
 
@@ -862,11 +1067,16 @@
     chrome.storage.sync.get(null, (saved) => {
       const needsMigration = Number(saved.settingsVersion || 0) < DEFAULT_SETTINGS.settingsVersion;
       settings = { ...DEFAULT_SETTINGS, ...saved };
-      if (needsMigration || !["surface", "individual", "manual"].includes(settings.ivSource)) {
+      if (!["surface", "individual", "manual"].includes(settings.ivSource)) {
         settings.ivSource = "surface";
-        settings.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
-        chrome.storage.sync.set({ ivSource: settings.ivSource, settingsVersion: settings.settingsVersion });
       }
+      settings.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
+      if (needsMigration) chrome.storage.sync.set({
+        settingsVersion: settings.settingsVersion,
+        alertsEnabled: settings.alertsEnabled,
+        gapThreshold: settings.gapThreshold,
+        maxSpreadPercent: settings.maxSpreadPercent,
+      });
       ensurePanel();
       syncPanel();
       render();

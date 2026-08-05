@@ -5,6 +5,9 @@ As of August 4, 2026.
 ## Methodology
 
 - [Cboe American- and European-Style Theoretical Options Calculation Methodology](https://cdn.cboe.com/api/global/us_indices/governance/Cboe_American_and_European-Style_Theoretical_Options_Calculation_Methodology.pdf): Cboe describes a strike/maturity volatility surface, U.S. Constant Maturity Treasury rates interpolated to each expiration, discrete dividend forecasts for American-style ETF options, and Black–Scholes for European-style index options.
+- [Cboe LiveVol methodology FAQ](https://datashop.cboe.com/faqs): Cboe states that option mid-price is normally used for implied volatility and that NBBO inputs are used. This supports using Robinhood's displayed Mark/IV pair instead of treating Ask IV as equivalent.
+- [SEC Investor.gov bid/ask definition](https://www.investor.gov/introduction-investing/investing-basics/glossary/ask-price): the bid/ask difference is the spread. The research-flag filter requires modeled edge beyond an executable-side quote and rejects spreads above the user-set threshold.
+- [SEC Investor Bulletin: An Introduction to Options](https://www.investor.gov/introduction-investing/general-resources/news-alerts/alerts-bulletins/investor-bulletins-63): options involve material risks and trade across multiple marketplaces. Extension flags are deliberately presented as research candidates, not final recommendations.
 - The extension follows the same input hierarchy at a screen-grade level. It cannot reproduce Cboe analytics without OPRA NBBO data, a professional forward-dividend database, and a full American exercise model.
 
 ## Risk-free rates

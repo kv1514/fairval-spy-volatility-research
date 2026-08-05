@@ -42,6 +42,12 @@
 #bsfv-scan-exact:hover { background: #dcf6e0; }
 #bsfv-scan-exact:disabled { cursor: wait; opacity: .65; }
 #bsfv-status { margin: 11px 0 0; padding: 8px; border-left: 2px solid var(--bsfv-green); background: #f1fbf2; color: #3b5540; font: 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+#bsfv-alerts { margin-top: 10px; padding: 9px; border: 1px solid #d8dddf; border-radius: 6px; background: #fafbfa; }
+#bsfv-alerts > div { display: flex; align-items: center; justify-content: space-between; color: #526069; font: 800 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; }
+#bsfv-alert-count { display: grid; place-items: center; min-width: 20px; height: 20px; border-radius: 999px; background: var(--bsfv-ink); color: white; }
+#bsfv-alert-list { display: grid; gap: 5px; margin: 8px 0 0; padding-left: 18px; color: #23323b; font: 9px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+#bsfv-alert-list:empty { display: none; }
+#bsfv-alert-note { margin: 7px 0 0; color: #7a858b; font-size: 8px; line-height: 1.4; }
 .bsfv-disclaimer { margin: 9px 0 0; color: #879097; font-size: 8px; text-transform: uppercase; letter-spacing: .04em; }
 #bsfv-panel.is-collapsed { width: 226px; }
 #bsfv-panel.is-disabled .bsfv-live-dot { background: #9aa3a8; box-shadow: none; }
@@ -66,6 +72,8 @@
 }
 [data-bsfv-overlay][data-signal="below"] { border-color: #efb6af; background: #fff1ef; color: #b52a1e; }
 [data-bsfv-overlay][data-signal="flat"] { border-color: #c8ced2; background: #f3f5f6; color: #59656d; }
+[data-bsfv-overlay][data-alert="below-model"] { border-width: 2px; border-color: #00a904; background: #dff9e3; color: #056b0b; box-shadow: 0 0 0 3px rgba(0, 200, 5, .14); }
+[data-bsfv-overlay][data-alert="above-model"] { border-width: 2px; border-color: #e14335; background: #ffe7e3; color: #a52218; box-shadow: 0 0 0 3px rgba(225, 67, 53, .12); }
 
 @media (max-width: 760px) {
   #bsfv-panel { left: 10px; right: 10px; bottom: 10px; width: auto; }
@@ -77,4 +85,6 @@
   .bsfv-control-grid input, .bsfv-control-grid select { background: #202d37; border-color: #55636d; color: white; }
   .bsfv-control-grid input:disabled { background: #2a353d; }
   #bsfv-status { background: #19331f; color: #b9e9be; }
+  #bsfv-alerts { border-color: #43515b; background: #202b33; }
+  #bsfv-alerts > div, #bsfv-alert-list { color: #e5eaed; }
 }

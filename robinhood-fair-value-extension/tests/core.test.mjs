@@ -38,6 +38,8 @@ test("parses the visible Robinhood option-chain fields", () => {
     { ticker: "SPY", seriesTicker: "SPY", side: "buy", optionType: "call" },
   );
   assert.equal(core.parseHeading("SPXW buy Put").ticker, "SPX");
+  assert.equal(core.parseHeading("BRK.B buy Call").ticker, "BRK.B");
+  assert.equal(core.parseHeading("A1BC sell Put").ticker, "A1BC");
   assert.equal(core.parseMoney("$1.50"), 1.5);
   assert.equal(core.parseMoney("—"), null);
   assert.equal(core.extractSelectedIv("Implied volatility18.22%Open interest566"), 18.22);
@@ -85,6 +87,8 @@ Delta
       bid: 1.1,
       mark: 1.13,
       ask: 1.15,
+      volume: 91963,
+      openInterest: 2886,
       iv: 20.35,
     },
   );
@@ -116,6 +120,85 @@ test("recovers a different implied volatility for each option quote", () => {
   const secondIv = core.impliedVolatility({ ...shared, strike: 105, marketPrice: secondPrice });
   assert.ok(Math.abs(firstIv - 18) < 0.001);
   assert.ok(Math.abs(secondIv - 27) < 0.001);
+});
+
+test("recovers an effective dividend/carry yield from a Mark and IV pair", () => {
+  const shared = {
+    optionType: "call",
+    spot: 200,
+    strike: 205,
+    days: 90,
+    volatility: 32,
+    rate: 4.1,
+  };
+  const marketPrice = core.calculateBlackScholes({ ...shared, dividend: 2.75 }).call;
+  const inferred = core.impliedDividendYield({ ...shared, marketPrice });
+  assert.ok(Math.abs(inferred - 2.75) < 0.001);
+  const putPrice = core.calculateBlackScholes({ ...shared, dividend: 2.75 }).put;
+  const inferredPut = core.impliedDividendYield({ ...shared, optionType: "put", marketPrice: putPrice });
+  assert.ok(Math.abs(inferredPut - 2.75) < 0.001);
+});
+
+test("builds a robust all-stock carry input from fresh liquid scanned quotes", () => {
+  const now = Date.parse("2026-08-04T20:00:00Z");
+  const shared = { optionType: "call", spot: 200, days: 90, rate: 4.1 };
+  const quotes = [190, 195, 200, 205, 210].map((strike, index) => {
+    const iv = 28 + index;
+    const mark = core.calculateBlackScholes({ ...shared, strike, volatility: iv, dividend: 2.5 }).call;
+    return {
+      strike,
+      mark,
+      iv,
+      bid: Math.max(mark - 0.05, 0.01),
+      ask: mark + 0.05,
+      capturedAt: now,
+    };
+  });
+  const carry = core.chainImpliedCarry({ ...shared, quotes, now });
+  assert.ok(Math.abs(carry.yield - 2.5) < 0.001);
+  assert.equal(carry.count, 5);
+});
+
+test("only flags executable discrepancies with fresh, liquid, tight quotes", () => {
+  const now = Date.parse("2026-08-04T20:00:00Z");
+  const exactQuote = {
+    bid: 0.98,
+    mark: 1,
+    ask: 1.02,
+    volume: 250,
+    openInterest: 1000,
+    capturedAt: now,
+  };
+  const flag = core.assessDiscrepancy({
+    fairValue: 1.25,
+    referencePrice: 1,
+    exactQuote,
+    gapThreshold: 10,
+    maxSpreadPercent: 20,
+    now,
+  });
+  assert.equal(flag.flagged, true);
+  assert.equal(flag.direction, "below-model");
+
+  const wide = core.assessDiscrepancy({
+    fairValue: 1.25,
+    referencePrice: 1,
+    exactQuote: { ...exactQuote, bid: 0.7, ask: 1.3 },
+    gapThreshold: 10,
+    maxSpreadPercent: 20,
+    now,
+  });
+  assert.equal(wide.flagged, false);
+
+  const stale = core.assessDiscrepancy({
+    fairValue: 1.25,
+    referencePrice: 1,
+    exactQuote: { ...exactQuote, capturedAt: now - 121_000 },
+    gapThreshold: 10,
+    maxSpreadPercent: 20,
+    now,
+  });
+  assert.equal(stale.flagged, false);
 });
 
 test("parses and interpolates the latest official Treasury curve", () => {
