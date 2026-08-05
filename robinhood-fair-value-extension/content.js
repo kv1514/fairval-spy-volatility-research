@@ -15,8 +15,9 @@
       { days: 730, rate: 4.2 },
     ],
   };
+  const IV_SOURCES = ["walkforward", "surface", "forecast", "individual", "manual"];
   const DEFAULT_SETTINGS = {
-    settingsVersion: 4,
+    settingsVersion: 5,
     enabled: true,
     ivSource: "surface",
     volatility: 20,
@@ -639,6 +640,39 @@
     return `$${Number(value).toFixed(2)}`;
   }
 
+  function forecastHorizonFromDte(days) {
+    if (!Number.isFinite(Number(days))) return null;
+    return Math.max(1, Math.round(Number(days)));
+  }
+
+  function selectVolatilityForecast(payload, ticker, requestedHorizon) {
+    if (payload?.schema !== "volatility_forecast.v1" || !Array.isArray(payload.records)) return null;
+    const normalizedTicker = String(ticker || "").toUpperCase() === "SPXW"
+      ? "SPX"
+      : String(ticker || "").toUpperCase();
+    const target = Math.max(Number(requestedHorizon) || 1, 1);
+    const eligible = payload.records
+      .filter((record) => String(record?.ticker || "").toUpperCase() === normalizedTicker)
+      .filter((record) => Number.isFinite(Number(record?.horizon)) && Number.isFinite(Number(record?.forecast_vol)))
+      .sort((left, right) => {
+        const horizonDifference = Math.abs(Number(left.horizon) - target) - Math.abs(Number(right.horizon) - target);
+        if (horizonDifference) return horizonDifference;
+        if (Number(left.horizon) !== Number(right.horizon)) return Number(right.horizon) - Number(left.horizon);
+        return String(right.as_of_date || "").localeCompare(String(left.as_of_date || ""));
+      });
+    if (!eligible.length) return null;
+    const selected = eligible[0];
+    return {
+      ticker: normalizedTicker,
+      asOfDate: String(selected.as_of_date || ""),
+      horizon: Number(selected.horizon),
+      forecastVol: Number(selected.forecast_vol),
+      modelUsed: String(selected.model_used || "unknown"),
+      lambdaUsed: selected.lambda_used == null ? null : Number(selected.lambda_used),
+      weightsUsed: selected.weights_used || null,
+    };
+  }
+
   function textWithoutOverlay(element) {
     if (!element) return "";
     const copy = element.cloneNode(true);
@@ -667,7 +701,9 @@
     parseTreasuryXml,
     sessionAlignedSpot,
     smoothedVolatility,
+    selectVolatilityForecast,
     thinPaperRecords,
+    forecastHorizonFromDte,
   };
 
   globalThis.__BSFV_CORE__ = Core;
@@ -679,6 +715,7 @@
   let renderQueued = false;
   let renderTimer;
   let treasuryCurve = FALLBACK_TREASURY_CURVE;
+  let volatilityForecast = { schema: "volatility_forecast.v1", records: [] };
   let exactQuotes = new Map();
   let exactQuoteChainKey = "";
   let scanRunning = false;
@@ -879,6 +916,7 @@
         <div class="bsfv-control-grid">
           <label class="bsfv-wide">Fair-IV model
             <select id="bsfv-iv-source">
+              <option value="walkforward">Walk-forward volatility forecast</option>
               <option value="surface">Smoothed market smile</option>
               <option value="forecast">Own forecast + market skew</option>
               <option value="individual">Individual market IV</option>
@@ -926,7 +964,7 @@
       syncPanel();
     });
     panel.querySelector("#bsfv-iv-source").addEventListener("change", (event) => {
-      settings.ivSource = ["surface", "forecast", "individual", "manual"].includes(event.target.value)
+      settings.ivSource = IV_SOURCES.includes(event.target.value)
         ? event.target.value
         : "surface";
       chrome.storage.sync.set({ ivSource: settings.ivSource });
@@ -1030,7 +1068,11 @@
       ? `option-aligned spot ${formatMoney(context.spot)} close · live ${formatMoney(context.liveSpot)}`
       : `spot ${formatMoney(context.spot)} live`;
     contextLine.textContent = `${context.ticker} ${context.optionType.toUpperCase()} · ${context.expiration} · ${spotCopy}`;
-    const ivCopy = settings.ivSource === "surface"
+    const ivCopy = settings.ivSource === "walkforward"
+      ? details.forecastRecord
+        ? `walk-forward ${details.forecastRecord.forecastVol.toFixed(2)}% · ${details.forecastRecord.modelUsed} · h${details.forecastRecord.horizon} · as of ${details.forecastRecord.asOfDate}`
+        : `walk-forward forecast missing for ${context.ticker}; import latest_forecasts.json`
+      : settings.ivSource === "surface"
       ? `neighbor smile from ${details.validIvCount ?? 0}/${details.totalRows ?? 0} visible IVs`
       : settings.ivSource === "forecast"
         ? `own ATM forecast ${Number(settings.volatility).toFixed(2)}% + live market skew`
@@ -1129,7 +1171,14 @@
         flagDirection: contract.alert.flagged ? contract.alert.direction : null,
         edgePercent: contract.alert.flagged ? contract.alert.edgePercent : null,
         modelMode: settings.ivSource,
-        forecastAtmIv: ["forecast", "manual"].includes(settings.ivSource) ? Number(settings.volatility) : null,
+        forecastAtmIv: settings.ivSource === "walkforward"
+          ? modelDetails.forecastRecord?.forecastVol ?? null
+          : ["forecast", "manual"].includes(settings.ivSource) ? Number(settings.volatility) : null,
+        forecastHorizon: modelDetails.forecastRecord?.horizon ?? null,
+        forecastAsOf: modelDetails.forecastRecord?.asOfDate ?? null,
+        forecastModel: modelDetails.forecastRecord?.modelUsed ?? null,
+        forecastLambda: modelDetails.forecastRecord?.lambdaUsed ?? null,
+        forecastWeights: modelDetails.forecastRecord?.weightsUsed ?? null,
         rate: modelDetails.rate,
         dividend: modelDetails.dividend,
         days: modelDetails.days,
@@ -1187,8 +1236,12 @@
         })
       : { yield: Number(settings.dividend), count: null, model: "manual" };
     const effectiveDividend = dividendDetails.yield;
-    const alertInputReady = !settings.autoDividend || Boolean(inferredCarry) ||
-      Object.prototype.hasOwnProperty.call(DIVIDEND_DEFAULTS, context.ticker);
+    const forecastRecord = settings.ivSource === "walkforward"
+      ? selectVolatilityForecast(volatilityForecast, context.ticker, forecastHorizonFromDte(days))
+      : null;
+    const alertInputReady = (!settings.autoDividend || Boolean(inferredCarry) ||
+      Object.prototype.hasOwnProperty.call(DIVIDEND_DEFAULTS, context.ticker)) &&
+      (settings.ivSource !== "walkforward" || Boolean(forecastRecord));
     const rows = [...context.grid.querySelectorAll('[data-testid^="ChainTableRow-"]')];
     const contracts = rows.map((row) => {
       const strikeCell = row.querySelector('[data-testid="OptionChainStrikePriceCell"]');
@@ -1220,12 +1273,15 @@
     const pricedContracts = contracts.map((contract) => {
       const { row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv } = contract;
       const surfaceIv = smoothedVolatility(strike, observations, context.spot);
+      const ownForecastVol = settings.ivSource === "walkforward"
+        ? forecastRecord?.forecastVol
+        : Number(settings.volatility);
       const baseIv = settings.ivSource === "manual"
         ? Number(settings.volatility)
-        : settings.ivSource === "forecast"
+        : ["walkforward", "forecast"].includes(settings.ivSource)
           ? Number.isFinite(surfaceIv) && Number.isFinite(marketSurfaceAtm)
-            ? surfaceIv + (Number(settings.volatility) - marketSurfaceAtm)
-            : null
+            ? surfaceIv + (ownForecastVol - marketSurfaceAtm)
+            : ownForecastVol
           : settings.ivSource === "individual"
             ? marketIv
             : surfaceIv;
@@ -1265,6 +1321,7 @@
       rate: effectiveRate,
       dividend: effectiveDividend,
       days,
+      forecastRecord,
     });
     syncPanel(context, {
       rate: effectiveRate,
@@ -1275,6 +1332,7 @@
       exactCount: contracts.filter((contract) => contract.exactQuote).length,
       alertInputReady,
       alerts,
+      forecastRecord,
     });
 
     for (const contract of pricedContracts) {
@@ -1328,8 +1386,12 @@
     chrome.storage.local.get({
       treasuryCurve: FALLBACK_TREASURY_CURVE,
       paperStudyV1: paperStudy,
+      volatilityForecastV1: volatilityForecast,
     }, (saved) => {
       if (saved.treasuryCurve?.points?.length) treasuryCurve = saved.treasuryCurve;
+      if (saved.volatilityForecastV1?.schema === "volatility_forecast.v1") {
+        volatilityForecast = saved.volatilityForecastV1;
+      }
       if (Array.isArray(saved.paperStudyV1?.records)) {
         const normalized = thinPaperRecords(saved.paperStudyV1.records).slice(-10_000);
         paperStudy = {
@@ -1352,7 +1414,7 @@
     chrome.storage.sync.get(null, (saved) => {
       const needsMigration = Number(saved.settingsVersion || 0) < DEFAULT_SETTINGS.settingsVersion;
       settings = { ...DEFAULT_SETTINGS, ...saved };
-      if (!["surface", "forecast", "individual", "manual"].includes(settings.ivSource)) {
+      if (!IV_SOURCES.includes(settings.ivSource)) {
         settings.ivSource = "surface";
       }
       settings.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
@@ -1390,6 +1452,9 @@
       if (area === "local") {
         if (changes.treasuryCurve?.newValue?.points?.length) treasuryCurve = changes.treasuryCurve.newValue;
         if (Array.isArray(changes.paperStudyV1?.newValue?.records)) paperStudy = changes.paperStudyV1.newValue;
+        if (changes.volatilityForecastV1?.newValue?.schema === "volatility_forecast.v1") {
+          volatilityForecast = changes.volatilityForecastV1.newValue;
+        }
         scheduleRender();
         return;
       }

@@ -12,12 +12,18 @@
       <label class="enabled"><span>Show overlays</span><input id="enabled" type="checkbox"></label>
       <label>IV source
         <select id="ivSource">
+          <option value="walkforward">Walk-forward forecast JSON</option>
           <option value="surface">Smoothed market smile</option>
           <option value="forecast">Own forecast + market skew</option>
           <option value="individual">Individual market IV</option>
           <option value="manual">Flat own-vol forecast</option>
         </select>
       </label>
+      <section class="forecast-import">
+        <strong>Walk-forward forecast bridge</strong>
+        <label>Import latest_forecasts.json<input id="forecastFile" type="file" accept="application/json,.json"></label>
+        <p id="forecastStatus">No forecast file imported.</p>
+      </section>
       <div class="grid">
         <label>Forecast ATM IV %<input id="volatility" type="number" min="0.01" max="500" step="0.1"></label>
         <label>Fair-IV shift pt<input id="ivShift" type="number" min="-100" max="100" step="0.1"></label>

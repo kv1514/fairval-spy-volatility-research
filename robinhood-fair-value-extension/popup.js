@@ -1,5 +1,5 @@
 const DEFAULTS = {
-  settingsVersion: 4,
+  settingsVersion: 5,
   enabled: true,
   ivSource: "surface",
   volatility: 20,
@@ -15,6 +15,7 @@ const DEFAULTS = {
   autoScanIntervalSeconds: 30,
   paperRecording: true,
 };
+const IV_SOURCES = ["walkforward", "surface", "forecast", "individual", "manual"];
 
 const fields = {
   enabled: document.getElementById("enabled"),
@@ -49,6 +50,17 @@ function showPaperStatus(study) {
     : `${records.toLocaleString()} snapshots · no 60m flag outcomes resolved yet.`;
 }
 
+function showForecastStatus(payload) {
+  const status = document.getElementById("forecastStatus");
+  if (payload?.schema !== "volatility_forecast.v1" || !Array.isArray(payload.records) || !payload.records.length) {
+    status.textContent = "No valid forecast file imported.";
+    return;
+  }
+  const tickers = [...new Set(payload.records.map((record) => String(record.ticker || "").toUpperCase()).filter(Boolean))];
+  const latest = payload.records.map((record) => String(record.as_of_date || "")).sort().at(-1);
+  status.textContent = `${payload.records.length} forecasts · ${tickers.join(", ")} · latest ${latest || "unknown"}`;
+}
+
 chrome.storage.sync.get(null, (saved) => {
   const settings = { ...DEFAULTS, ...saved };
   if (Number(saved.settingsVersion || 0) < DEFAULTS.settingsVersion) chrome.storage.sync.set({
@@ -61,7 +73,7 @@ chrome.storage.sync.get(null, (saved) => {
     paperRecording: settings.paperRecording,
   });
   fields.enabled.checked = settings.enabled;
-  fields.ivSource.value = ["surface", "forecast", "individual", "manual"].includes(settings.ivSource)
+  fields.ivSource.value = IV_SOURCES.includes(settings.ivSource)
     ? settings.ivSource
     : "surface";
   fields.volatility.value = settings.volatility;
@@ -79,9 +91,42 @@ chrome.storage.sync.get(null, (saved) => {
   syncDisabledState();
 });
 
-chrome.storage.local.get({ paperStudyV1: { version: 2, records: [] } }, ({ paperStudyV1 }) => showPaperStatus(paperStudyV1));
+chrome.storage.local.get({
+  paperStudyV1: { version: 2, records: [] },
+  volatilityForecastV1: { schema: "volatility_forecast.v1", records: [] },
+}, ({ paperStudyV1, volatilityForecastV1 }) => {
+  showPaperStatus(paperStudyV1);
+  showForecastStatus(volatilityForecastV1);
+});
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.paperStudyV1?.newValue) showPaperStatus(changes.paperStudyV1.newValue);
+  if (area === "local" && changes.volatilityForecastV1?.newValue) showForecastStatus(changes.volatilityForecastV1.newValue);
+});
+
+document.getElementById("forecastFile").addEventListener("change", async (event) => {
+  const message = document.getElementById("message");
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    const payload = JSON.parse(await file.text());
+    if (payload?.schema !== "volatility_forecast.v1" || !Array.isArray(payload.records) || !payload.records.length) {
+      throw new Error("Expected schema volatility_forecast.v1 with at least one record");
+    }
+    const invalid = payload.records.some((record) =>
+      !record.ticker || !Number.isFinite(Number(record.horizon)) || !Number.isFinite(Number(record.forecast_vol))
+    );
+    if (invalid) throw new Error("A forecast record is missing ticker, horizon, or forecast_vol");
+    chrome.storage.local.set({ volatilityForecastV1: payload });
+    fields.ivSource.value = "walkforward";
+    chrome.storage.sync.set({ ivSource: "walkforward", settingsVersion: DEFAULTS.settingsVersion });
+    showForecastStatus(payload);
+    syncDisabledState();
+    message.textContent = "Forecast imported. Apply, then return to Robinhood.";
+  } catch (error) {
+    message.textContent = `Import failed: ${error.message}`;
+  } finally {
+    event.target.value = "";
+  }
 });
 
 fields.ivSource.addEventListener("change", syncDisabledState);
@@ -93,7 +138,7 @@ document.getElementById("apply").addEventListener("click", () => {
   const settings = {
     settingsVersion: DEFAULTS.settingsVersion,
     enabled: fields.enabled.checked,
-    ivSource: ["surface", "forecast", "individual", "manual"].includes(fields.ivSource.value)
+    ivSource: IV_SOURCES.includes(fields.ivSource.value)
       ? fields.ivSource.value
       : "surface",
     volatility: Math.max(0.01, Number(fields.volatility.value) || DEFAULTS.volatility),

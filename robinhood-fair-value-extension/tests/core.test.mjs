@@ -32,6 +32,24 @@ test("matches the standard Black-Scholes reference result", () => {
   assert.ok(Math.abs(result.put - 5.5735) < 0.001);
 });
 
+test("selects the nearest leakage-safe walk-forward horizon", () => {
+  const payload = {
+    schema: "volatility_forecast.v1",
+    records: [
+      { ticker: "SPY", as_of_date: "2026-08-04", horizon: 1, forecast_vol: 15, model_used: "ewma", lambda_used: 0.94 },
+      { ticker: "SPY", as_of_date: "2026-08-04", horizon: 5, forecast_vol: 19, model_used: "optimized_blend" },
+      { ticker: "SPX", as_of_date: "2026-08-04", horizon: 5, forecast_vol: 18, model_used: "fixed_blend" },
+    ],
+  };
+  const selected = core.selectVolatilityForecast(payload, "SPY", 4);
+  assert.equal(selected.horizon, 5);
+  assert.equal(selected.forecastVol, 19);
+  assert.equal(selected.modelUsed, "optimized_blend");
+  assert.equal(core.selectVolatilityForecast(payload, "SPXW", 5).ticker, "SPX");
+  assert.equal(core.selectVolatilityForecast(payload, "QQQ", 5), null);
+  assert.equal(core.forecastHorizonFromDte(7.2), 7);
+});
+
 test("parses the visible Robinhood option-chain fields", () => {
   assert.deepEqual(
     { ...core.parseHeading("SPY buy Call") },

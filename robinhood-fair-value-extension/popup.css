@@ -8,7 +8,7 @@ main { padding: 17px; }
 .brand strong { font-size: 14px; }
 .brand small { margin-top: 2px; color: #69747c; font-size: 9px; }
 label { display: block; margin-top: 11px; color: #5c6870; font-size: 10px; }
-input[type="number"], select { width: 100%; height: 36px; margin-top: 5px; padding: 0 9px; border: 1px solid #c3c9cd; border-radius: 6px; outline: none; background: white; color: #101b24; font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+input[type="number"], input[type="file"], select { width: 100%; height: 36px; margin-top: 5px; padding: 0 9px; border: 1px solid #c3c9cd; border-radius: 6px; outline: none; background: white; color: #101b24; font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
 input:focus, select:focus { border-color: #00a904; box-shadow: 0 0 0 3px rgba(0,200,5,.1); }
 input:disabled { background: #e8ebec; color: #7d868b; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
@@ -21,3 +21,8 @@ button.secondary { height: 34px; margin-top: 9px; border: 1px solid #c3c9cd; bac
 button.secondary:hover { background: #edf0ee; }
 #paperStatus { margin: 9px 0 0; color: #526068; font-size: 9px; line-height: 1.45; text-align: center; }
 #message { min-height: 14px; margin: 9px 0 0; color: #758087; font-size: 9px; text-align: center; }
+.forecast-import { margin-top: 12px; padding: 10px; border: 1px solid #cbd1ce; border-radius: 7px; background: #eef5ef; }
+.forecast-import strong { font-size: 10px; }
+.forecast-import label { margin-top: 7px; }
+.forecast-import input[type="file"] { height: auto; min-height: 36px; padding: 7px; font-size: 8px; }
+#forecastStatus { margin: 7px 0 0; color: #526068; font-size: 8px; line-height: 1.4; }

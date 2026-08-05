@@ -17,6 +17,7 @@ A local Chrome extension that reads any classic single-stock, ETF, or supported-
 - Retains expiration-aware public dividend fallbacks for SPY, SPX, and QQQ. Other tickers use an explicitly labeled 0% fallback until enough exact quotes are scanned; manual dividend input remains available.
 - Highlights only fresh, liquid contracts whose modeled edge extends past the executable ask/bid, clears the configured percentage threshold, and is not explained by a wide spread.
 - Adds an independent **Own forecast + market skew** mode. It shifts the live strike smile so its ATM level equals the user's realized-volatility forecast, then shows the resulting per-contract `IV EDGE` and model price.
+- Adds a **Walk-forward volatility forecast** mode backed by a Python/pandas research engine. The engine tests 5/10/20/60-day realized volatility, fixed and optimized variance blends, and coarse-to-fine EWMA lambda selection across 1/2/3/5/10-day horizons without training on unfinished future targets.
 - Records exact quote snapshots and forward 15/60-minute paper outcomes locally. Long-side candidates are scored ask-to-later-bid; sell-side candidates are scored bid-to-later-ask. The popup can export or clear this JSON study.
 - Makes no brokerage-data requests, does not read account credentials, and cannot place orders. Its only external request is the public Treasury curve.
 
@@ -52,6 +53,7 @@ The panel ranks up to five flags by edge-to-spread coverage. A flag means “rec
 
 ## Reading the result
 
+- **Walk-forward forecast JSON** imports the engine's compact `latest_forecasts.json`, chooses the nearest model horizon for the visible DTE, and replaces market ATM volatility with the selected out-of-sample forecast while preserving live strike skew.
 - **Smoothed market smile** is the default relative-value screen. Fair value uses an outlier-resistant local fit of neighboring strikes and excludes the contract's own IV. Automatic scanning replaces temporary ask-derived estimates with Robinhood's exact Mark IVs.
 - **Own forecast + market skew** is the independent-volatility workflow. Enter your forecast of future ATM realized volatility. The extension preserves the live strike skew while replacing the market's ATM volatility level with your forecast.
 - **Individual market IV** uses each contract's raw quote-implied IV. With a zero IV shift, the model necessarily reproduces the quote used to infer IV; this mode is diagnostic, not an independent fair value.
@@ -75,6 +77,12 @@ For scanned rows, the extension compares fair value with Robinhood's exact Mark 
 These are transparent screen-grade approximations, not OPRA/Cboe professional analytics. Cboe's production methodology uses NBBO data, a full interest-rate curve, forward discrete-dividend forecasts, and an American-style model where applicable. The extension therefore labels output as research candidates rather than trade recommendations.
 
 See [SOURCES.md](SOURCES.md) for the source URLs, as-of dates, embedded fallback curve, and interpretation notes.
+
+## Walk-forward research engine
+
+Run the new pandas pipeline after each official daily close, then import `volatility-research-output/latest_forecasts.json` from the popup. Full formulas, schemas, leakage controls, CLI arguments, and outputs are documented in [volatility_research/README.md](volatility_research/README.md). The reproducible SPY/QQQ/SPX demonstration and out-of-sample error table are in [VOLATILITY_RESEARCH_RESULTS.md](VOLATILITY_RESEARCH_RESULTS.md).
+
+The extension keeps live Mark/IV scanning separate from the daily forecast. That distinction is important: market IV updates continuously, while a daily-return forecast should change only when a new daily close enters the model.
 
 ## Reproducible simulation
 
