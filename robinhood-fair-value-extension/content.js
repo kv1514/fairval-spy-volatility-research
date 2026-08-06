@@ -39,17 +39,40 @@
 
   const normalPdf = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 
+  // Hart's rational-Chebyshev cumulative normal (as popularized by Graeme West).
+  // Accurate to roughly 1e-15, matching the Python engine's full-precision erf
+  // and replacing the earlier Abramowitz-Stegun approximation whose ~1e-7 error
+  // was the dominant source of price, greek, and implied-volatility inaccuracy.
   function normalCdf(x) {
-    const sign = x < 0 ? -1 : 1;
-    const absolute = Math.abs(x) / Math.sqrt(2);
-    const t = 1 / (1 + 0.3275911 * absolute);
-    const erf =
-      1 -
-      (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t +
-        0.254829592) *
-        t *
-        Math.exp(-absolute * absolute));
-    return 0.5 * (1 + sign * erf);
+    if (!Number.isFinite(x)) return x > 0 ? 1 : 0;
+    const absX = Math.abs(x);
+    if (absX > 37) return x > 0 ? 1 : 0;
+    const exponential = Math.exp((-absX * absX) / 2);
+    let tail;
+    if (absX < 7.07106781186547) {
+      let numerator = 3.52624965998911e-2 * absX + 0.700383064443688;
+      numerator = numerator * absX + 6.37396220353165;
+      numerator = numerator * absX + 33.912866078383;
+      numerator = numerator * absX + 112.079291497871;
+      numerator = numerator * absX + 221.213596169931;
+      numerator = numerator * absX + 220.206867912376;
+      let denominator = 8.83883476483184e-2 * absX + 1.75566716318264;
+      denominator = denominator * absX + 16.064177579207;
+      denominator = denominator * absX + 86.7807322029461;
+      denominator = denominator * absX + 296.564248779674;
+      denominator = denominator * absX + 637.333633378831;
+      denominator = denominator * absX + 793.826512519948;
+      denominator = denominator * absX + 440.413735824752;
+      tail = (exponential * numerator) / denominator;
+    } else {
+      let build = absX + 0.65;
+      build = absX + 4 / build;
+      build = absX + 3 / build;
+      build = absX + 2 / build;
+      build = absX + 1 / build;
+      tail = exponential / build / 2.506628274631;
+    }
+    return x > 0 ? 1 - tail : tail;
   }
 
   function calculateBlackScholes(input) {
@@ -83,21 +106,39 @@
     return String(input.optionType).toLowerCase() === "put" ? result.put : result.call;
   }
 
+  // Safeguarded Newton inversion (vega-driven with a maintained bracket and a
+  // bisection fallback), mirroring the Python engine. Newton gives quadratic
+  // convergence for a far tighter implied volatility than the previous 80-step
+  // bisection, while the bracket prevents the divergence risk of raw Newton.
   function impliedVolatility(input) {
     const target = Number(input.marketPrice);
     if (!Number.isFinite(target) || target <= 0) return null;
+    const isPut = String(input.optionType).toLowerCase() === "put";
+    const priceAt = (volatility) => {
+      const greeks = calculateBlackScholes({ ...input, volatility });
+      return { price: isPut ? greeks.put : greeks.call, vega: greeks.vega };
+    };
 
-    const lowVolPrice = optionPrice({ ...input, volatility: 0.01 });
-    const highVolPrice = optionPrice({ ...input, volatility: 500 });
-    if (target < lowVolPrice - 0.015 || target > highVolPrice + 0.015) return null;
+    if (target < priceAt(0.01).price - 0.015 || target > priceAt(500).price + 0.015) return null;
 
     let low = 0.01;
     let high = 500;
-    for (let iteration = 0; iteration < 80; iteration += 1) {
-      const midpoint = (low + high) / 2;
-      const price = optionPrice({ ...input, volatility: midpoint });
-      if (price > target) high = midpoint;
-      else low = midpoint;
+    const T = Math.max(Number(input.days) / 365, 1 / (365 * 24 * 60));
+    const spot = Math.max(Number(input.spot), 1e-9);
+    // Brenner-Subrahmanyam near-ATM starting guess, clamped to the bracket.
+    let guess = Math.min(Math.max((Math.sqrt((2 * Math.PI) / T) * target) / spot * 100, low), high);
+    for (let iteration = 0; iteration < 100; iteration += 1) {
+      const { price, vega } = priceAt(guess);
+      // Price is monotone increasing in volatility, so keep the root bracketed.
+      if (price < target) low = guess;
+      else high = guess;
+      if (high - low <= 1e-10) break; // volatility-space convergence, like bisection
+      const difference = price - target;
+      const newton = vega > 1e-12 ? guess - difference / vega : Infinity;
+      // Accept a Newton step only inside the bracket; otherwise bisect. Where
+      // vega is tiny this degrades gracefully to bisection, which still narrows
+      // the bracket to machine precision like the previous solver.
+      guess = newton > low && newton < high ? newton : (low + high) / 2;
     }
     const result = (low + high) / 2;
     const sensitivity = calculateBlackScholes({ ...input, volatility: result }).vega;

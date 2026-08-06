@@ -32,7 +32,7 @@ The model is European-style Black–Scholes. Most U.S. single-stock and ETF cont
 4. Select this entire `robinhood-fair-value-extension` folder.
 5. Open a Robinhood classic option chain for any available stock, ETF, or supported index.
 
-A packaged build is also provided as `robinhood-fair-value-overlay-1.5.0.zip`, containing
+A packaged build is also provided as `robinhood-fair-value-overlay-1.5.1.zip`, containing
 `manifest.json`, `content.js`, `content.css`, `popup.html`, `popup.js`, and `popup.css`. To
 install from it, unzip the archive into a folder and **Load unpacked** that folder (Chrome
 cannot load a `.zip` directly in developer mode).
