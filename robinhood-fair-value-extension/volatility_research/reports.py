@@ -72,12 +72,47 @@ def _formula_table(weights_history: pd.DataFrame | None) -> str:
     return _table(["Ticker", "Horizon", "Optimized blend (dense)", "Sparse blend (selected windows)"], rows)
 
 
+def _threshold_section(threshold_study: pd.DataFrame | None) -> str:
+    """Signal reliability as the volatility gap widens, with an honest verdict."""
+
+    if threshold_study is None or threshold_study.empty:
+        return '<p class="muted">Supply a historical option-IV series to study reliability by edge threshold.</p>'
+    rows: list[list[str]] = []
+    for row in threshold_study.sort_values(["ticker", "min_abs_vol_edge_points"]).itertuples(index=False):
+        rows.append([
+            escape(str(row.ticker)), f"{float(row.min_abs_vol_edge_points):.0f}",
+            f"{int(row.observations):,}", _number(row.coverage_pct, 3),
+            _number(getattr(row, "directional_accuracy_vs_market_iv", None), 3),
+            _number(getattr(row, "variance_skill_vs_market", None), 3),
+        ])
+    table = _table(
+        ["Ticker", "Min |vol edge| (pts)", "Obs", "Coverage %", "Directional acc. vs mkt IV", "Variance skill vs mkt IV"],
+        rows,
+    )
+    # State the verdict the numbers support rather than implying a buy trigger.
+    accuracy = pd.to_numeric(threshold_study["directional_accuracy_vs_market_iv"], errors="coerce").dropna()
+    monotone = bool(accuracy.is_monotonic_increasing) if len(accuracy) > 1 else False
+    verdict = (
+        "Directional accuracy does <strong>not</strong> improve monotonically as the gap widens in this sample, "
+        "so the size of the gap alone was not a dependable signal."
+        if not monotone else
+        "Directional accuracy rises with the gap in this sample, but this is a forecast-skill diagnostic on a "
+        "limited history, not evidence of a profitable rule after spreads and costs."
+    )
+    return (
+        f'{table}<p class="muted">Positive variance skill means the model beat simply trusting market IV at that '
+        f'gap. Coverage falls as the threshold rises because wide gaps are rare. {verdict} This is a research '
+        f'diagnostic, not a buy/sell threshold.</p>'
+    )
+
+
 def write_variance_diagnostics_report(
     output_path: str | Path,
     diagnostics: pd.DataFrame,
     rankings: pd.DataFrame,
     forecast_rows: int,
     weights_history: pd.DataFrame | None = None,
+    threshold_study: pd.DataFrame | None = None,
     source_pdf: str = "Martin Haugh, The Black-Scholes Model, equation (24), page 12",
 ) -> Path:
     target = Path(output_path)
@@ -152,6 +187,7 @@ def write_variance_diagnostics_report(
 
     all_models_table = _all_models_table(diagnostics)
     formula_table = _formula_table(weights_history)
+    threshold_section = _threshold_section(threshold_study)
 
     html = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -182,6 +218,7 @@ th:first-child,td:first-child{{text-align:left}}.model-pill{{display:inline-bloc
 <section><h2>All candidate models by ticker and horizon</h2><p class="muted">Every model is scored on the same out-of-sample completed targets. The winner is the lowest variance MSE; alternatives are shown so the margin is visible.</p>{all_models_table}</section>
 <section><h2>Latest blend formulas</h2><p class="muted">The dense optimized blend spreads variance weight across the candidate windows; the sparse blend keeps only the few windows that earn their place (weights below 1e-8 are dropped).</p>{formula_table}</section>
 <section><h2>Best forecast by moneyness bucket</h2><p class="muted">A bucket changes the set of dates evaluated; it does not make an underlying-volatility forecast strike-specific.</p>{bucket_table}</section>
+<section><h2>Signal reliability by edge threshold</h2><p class="muted">Does a bigger gap between the model forecast and market IV mean a more reliable signal? This sweep answers empirically — it is a forecast-skill diagnostic, not a "safe to buy" threshold.</p>{threshold_section}</section>
 <section><h2>Current research queue</h2><p class="muted">Candidates are prioritized for further review, not recommended trades.</p>{candidates_table}</section>
 <section class="sources"><h2>Sources and limitations</h2><p><strong>Model source:</strong> {escape(source_pdf)}. <strong>Market data:</strong> included Robinhood daily bars, live option quote snapshot, and historical hourly last-trade replay. The replay lacks historical NBBO, so inverted historical IV percentiles are screen-grade rather than execution-grade.</p></section>
 </main></body></html>'''

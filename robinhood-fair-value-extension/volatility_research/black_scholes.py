@@ -8,17 +8,15 @@ import numpy as np
 import pandas as pd
 
 
+# Full double-precision error function (math.erf is correct to ~1e-16), applied
+# elementwise. This replaces the earlier Abramowitz-Stegun approximation whose
+# error near ~1e-7 was the dominant source of price/greek/IV inaccuracy.
+_vector_erf = np.vectorize(math.erf, otypes=[float])
+
+
 def _normal_cdf(value: np.ndarray) -> np.ndarray:
-    # Abramowitz-Stegun approximation; accurate enough for screening and avoids scipy.
-    sign = np.where(value < 0, -1.0, 1.0)
-    absolute = np.abs(value) / math.sqrt(2.0)
-    t = 1.0 / (1.0 + 0.3275911 * absolute)
-    polynomial = (
-        (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592)
-        * t
-    )
-    erf = 1.0 - polynomial * np.exp(-(absolute**2))
-    return 0.5 * (1.0 + sign * erf)
+    array = np.asarray(value, dtype=float)
+    return 0.5 * (1.0 + _vector_erf(array / math.sqrt(2.0)))
 
 
 def _normal_pdf(value: np.ndarray) -> np.ndarray:
@@ -156,10 +154,17 @@ def implied_volatility_percent(
     dividend_percent: float = 0.0,
     lower: float = 0.01,
     upper: float = 500.0,
-    tolerance: float = 1e-7,
+    tolerance: float = 1e-8,
     max_iterations: int = 120,
 ) -> float:
-    """Invert Black-Scholes by bisection, rejecting prices outside model bounds."""
+    """Invert Black-Scholes for implied volatility (percent).
+
+    Uses safeguarded Newton iteration driven by vega, and falls back to a
+    bisection step whenever a Newton step would leave the bracket or stall.
+    Prices outside the model's arbitrage bounds are rejected as NaN. Combining
+    Newton with a maintained bracket keeps the fast quadratic convergence of
+    Newton's method without the divergence risk of unsafeguarded Newton.
+    """
 
     if not all(np.isfinite(value) for value in (market_price, spot, strike, dte)):
         return float("nan")
@@ -171,17 +176,36 @@ def implied_volatility_percent(
             spot, strike, dte, volatility, rate_percent, dividend_percent, option_type,
         )).item())
 
-    low_price, high_price = price(lower), price(upper)
+    def vega_per_point(volatility: float) -> float:
+        return float(np.asarray(black_scholes_greeks(
+            spot, strike, dte, volatility, rate_percent, dividend_percent,
+        )["vega"]).item())
+
+    low, high = float(lower), float(upper)
+    low_price, high_price = price(low), price(high)
+    # The price is monotone increasing in volatility, so a target outside
+    # [price(lower), price(upper)] has no implied volatility on the grid.
     if market_price < low_price - tolerance or market_price > high_price + tolerance:
         return float("nan")
-    low, high = float(lower), float(upper)
+
+    # A volatility-agnostic starting guess (Brenner-Subrahmanyam) close to ATM.
+    guess = max(min(math.sqrt(2.0 * math.pi / (dte / 365.0)) * market_price / spot * 100.0, high), low)
     for _ in range(max_iterations):
-        middle = 0.5 * (low + high)
-        model_price = price(middle)
-        if abs(model_price - market_price) <= tolerance:
-            return middle
-        if model_price < market_price:
-            low = middle
+        model_price = price(guess)
+        difference = model_price - market_price
+        if abs(difference) <= tolerance:
+            return guess
+        # Maintain the bracket around the root as new information arrives.
+        if difference < 0:
+            low = guess
         else:
-            high = middle
-    return 0.5 * (low + high)
+            high = guess
+        slope = vega_per_point(guess)
+        newton = guess - difference / slope if slope > 1e-12 else float("inf")
+        # Accept the Newton step only if it stays strictly inside the bracket;
+        # otherwise bisect. This is the classic safeguarded-Newton hybrid.
+        if low < newton < high:
+            guess = newton
+        else:
+            guess = 0.5 * (low + high)
+    return guess

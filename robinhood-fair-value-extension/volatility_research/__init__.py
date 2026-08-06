@@ -8,6 +8,7 @@ from .engine import (
     format_blend_formula,
     latest_forecast_payload,
     rank_option_contracts,
+    threshold_sensitivity_study,
 )
 from .surface import add_volatility_surface_context
 
@@ -20,4 +21,5 @@ __all__ = [
     "format_blend_formula",
     "latest_forecast_payload",
     "rank_option_contracts",
+    "threshold_sensitivity_study",
 ]

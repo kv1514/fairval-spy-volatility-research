@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import sys
 from pathlib import Path
@@ -28,6 +29,7 @@ from volatility_research.engine import (  # noqa: E402
     diagnose_models_by_moneyness,
     format_blend_formula,
     rank_option_contracts,
+    threshold_sensitivity_study,
 )
 from volatility_research.surface import add_volatility_surface_context  # noqa: E402
 
@@ -278,6 +280,29 @@ class SurfaceAndDiagnosticsTests(unittest.TestCase):
         self.assertEqual(int(five_day_atm["iv_percentile_observations"]), 25)
         self.assertGreater(float(five_day_atm["iv_percentile"]), 90.0)
 
+    def test_threshold_study_is_research_framed_and_coverage_decreases(self) -> None:
+        prices = sample_prices()
+        engine = VolatilityResearchEngine(ForecastConfig(horizons=(5,), min_train_observations=12, rebalance_every=10))
+        forecasts = engine.fit_predict(prices)
+        completed = forecasts[(forecasts["model"] == "best_model") & forecasts["future_realized_vol"].notna()]
+        market_iv = pd.DataFrame({
+            "ticker": "SPY",
+            "date": completed["date"].to_numpy(),
+            "dte": 5,
+            "market_iv": np.clip(completed["forecast_vol"].to_numpy() - 4.0, 1.0, None),
+        })
+        study = threshold_sensitivity_study(forecasts, market_iv, thresholds=(0.0, 2.0, 5.0))
+        expected = {
+            "ticker", "min_abs_vol_edge_points", "observations", "coverage_pct",
+            "directional_accuracy_vs_market_iv", "variance_skill_vs_market",
+        }
+        self.assertTrue(expected.issubset(study.columns))
+        spy = study[study["ticker"] == "SPY"].sort_values("min_abs_vol_edge_points")
+        # Wider gaps are rarer, so coverage must be non-increasing in the threshold.
+        self.assertTrue((spy["coverage_pct"].diff().dropna() <= 1e-9).all())
+        self.assertAlmostEqual(float(spy.iloc[0]["coverage_pct"]), 100.0, places=6)
+        self.assertLessEqual(float(spy["directional_accuracy_vs_market_iv"].max()), 1.0)
+
     def test_diagnostics_selects_one_variance_winner_per_group(self) -> None:
         prices = sample_prices()
         engine = VolatilityResearchEngine(ForecastConfig(horizons=(5,), min_train_observations=12, rebalance_every=10))
@@ -324,10 +349,20 @@ class BlackScholesPropertyTests(unittest.TestCase):
             self.assertGreater(high, low)
 
     def test_iv_solver_recovers_known_sigma(self) -> None:
+        # The safeguarded-Newton solver recovers sigma to far tighter precision
+        # than the old bisection-only inversion (which the 1e-4 check reflected).
         for sigma in (12.0, 27.5, 60.0):
-            price = float(black_scholes_price(self.S, self.K, self.DTE, sigma, self.R, self.Q, "call"))
-            recovered = implied_volatility_percent(price, self.S, self.K, self.DTE, "call", self.R, self.Q)
-            self.assertAlmostEqual(recovered, sigma, places=4)
+            for option_type, strike in (("call", 100.0), ("put", 90.0), ("call", 115.0)):
+                price = float(black_scholes_price(self.S, strike, self.DTE, sigma, self.R, self.Q, option_type))
+                recovered = implied_volatility_percent(price, self.S, strike, self.DTE, option_type, self.R, self.Q)
+                self.assertAlmostEqual(recovered, sigma, places=5)
+
+    def test_normal_cdf_matches_full_precision_erf(self) -> None:
+        from volatility_research.black_scholes import _normal_cdf
+
+        xs = np.linspace(-6.0, 6.0, 61)
+        reference = np.array([0.5 * (1.0 + math.erf(x / math.sqrt(2.0))) for x in xs])
+        np.testing.assert_allclose(_normal_cdf(xs), reference, atol=1e-15)
 
     def test_gamma_and_vega_are_equal_for_call_and_put(self) -> None:
         call = black_scholes_greeks(self.S, self.K, self.DTE, self.VOL, self.R, self.Q, "call")

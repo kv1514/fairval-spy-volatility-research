@@ -85,6 +85,7 @@ Use `--training-window 0` for expanding rather than rolling training. The comman
 - `option_rankings.csv`: required contract DataFrame plus executable-edge and liquidity fields
 - `ewma_lambda_performance.csv`, `blend_weights_history.csv`, and `model_selection_history.csv`
 - `model_diagnostics.csv`: optimized blend, sparse blend, EWMA, realized-20, and realized-60 variance errors by ticker, horizon, and available moneyness bucket, with exactly one winner marked per group
+- `threshold_study.csv`: forecast-reliability sweep — for each minimum `|forecast_vol - market_iv|` gap it reports observation count, coverage, directional accuracy versus market IV, and variance skill versus simply trusting market IV. It answers "does a bigger gap mean a more reliable signal?" empirically and is a research diagnostic, **not** a buy/sell threshold. It needs a historical market-IV series (`--surface-history`), so it only covers tickers with supplied option history.
 - `latest_forecasts.json`: compact `volatility_forecast.v1` bridge for the Chrome extension
 - `variance_diagnostics_report.html`: standalone diagnostics and current research queue
 - six SVG charts and a local `visualizations/index.html` dashboard

@@ -16,6 +16,7 @@ from .engine import (
     json_safe_frame,
     latest_forecast_payload,
     rank_option_contracts,
+    threshold_sensitivity_study,
 )
 from .reports import write_variance_diagnostics_report
 from .visualizations import write_visualizations
@@ -62,6 +63,15 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
         option_history=surface_history if not surface_history.empty else None,
         horizons=config.horizons,
     )
+    # A historical market-IV time series (the surface history) is required to
+    # study how forecast reliability changes with the volatility gap.
+    threshold_market_iv = surface_history if not surface_history.empty else (
+        options[["ticker", "date", "dte", "market_iv"]] if not options.empty else None
+    )
+    threshold_study = (
+        threshold_sensitivity_study(forecasts, threshold_market_iv, horizons=config.horizons)
+        if threshold_market_iv is not None else pd.DataFrame()
+    )
 
     paths = {
         "forecasts": output / "forecasts.csv",
@@ -71,6 +81,7 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
         "weights": output / "blend_weights_history.csv",
         "model_selection": output / "model_selection_history.csv",
         "diagnostics": output / "model_diagnostics.csv",
+        "threshold_study": output / "threshold_study.csv",
         "diagnostics_report": output / "variance_diagnostics_report.html",
         "latest_json": output / "latest_forecasts.json",
     }
@@ -81,6 +92,7 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     json_safe_frame(engine.weights_history_).to_csv(paths["weights"], index=False)
     json_safe_frame(engine.model_selection_history_).to_csv(paths["model_selection"], index=False)
     diagnostics.to_csv(paths["diagnostics"], index=False)
+    threshold_study.to_csv(paths["threshold_study"], index=False)
     paths["latest_json"].write_text(
         json.dumps(latest_forecast_payload(
             forecasts,
@@ -90,7 +102,7 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     )
     write_variance_diagnostics_report(
         paths["diagnostics_report"], diagnostics, rankings, forecast_rows=len(forecasts),
-        weights_history=engine.weights_history_,
+        weights_history=engine.weights_history_, threshold_study=threshold_study,
     )
     write_visualizations(output / "visualizations", forecasts, evaluation, engine.lambda_performance_, engine.weights_history_, rankings)
     return paths

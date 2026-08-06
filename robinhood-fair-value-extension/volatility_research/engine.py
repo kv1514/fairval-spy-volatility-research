@@ -651,6 +651,93 @@ def diagnose_models_by_moneyness(
     return diagnostics.sort_values(group_columns + ["mse_variance"]).reset_index(drop=True)
 
 
+DEFAULT_EDGE_THRESHOLDS = (0.0, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0)
+
+
+def threshold_sensitivity_study(
+    forecasts: pd.DataFrame,
+    market_iv: pd.DataFrame,
+    thresholds: Iterable[float] = DEFAULT_EDGE_THRESHOLDS,
+    horizons: Iterable[int] = DEFAULT_HORIZONS,
+) -> pd.DataFrame:
+    """Measure how forecast reliability changes as the volatility gap widens.
+
+    This is a forecast-skill study, not a trading rule. For each minimum
+    ``|forecast_vol - market_iv|`` gap (in volatility points) it reports, over
+    the strictly out-of-sample completed targets:
+
+    - how many observations clear the gap and what share of all observations
+      that is (larger gaps are rarer);
+    - directional accuracy: how often the sign of the forecast-vs-market gap
+      matched the sign of realized-vs-market volatility;
+    - variance skill: mean squared variance error using market IV as the
+      forecast minus the same using the model forecast (positive means the
+      model beat simply trusting market IV at that gap).
+
+    Historical market IV is aligned to each forecast origin by ticker, date and
+    nearest horizon; multiple quotes per origin are reduced to their median so
+    the comparison is an at-the-money-style level, not a single strike. Only
+    tickers with supplied historical option IV appear. A widening gap that does
+    not raise directional accuracy or variance skill is itself the finding:
+    the size of the gap alone would not have been a dependable signal.
+    """
+
+    _validate_columns(
+        forecasts, ("ticker", "date", "horizon", "model", "forecast_vol", "future_realized_vol"), "forecasts",
+    )
+    _validate_columns(market_iv, ("ticker", "date", "dte", "market_iv"), "market_iv")
+    best = forecasts[forecasts["model"] == "best_model"].dropna(subset=["future_realized_vol"]).copy()
+    best["date"] = pd.to_datetime(best["date"]).dt.normalize()
+
+    quotes = market_iv[["ticker", "date", "dte", "market_iv"]].copy()
+    quotes["ticker"] = quotes["ticker"].astype(str).str.upper().str.strip()
+    quotes["date"] = pd.to_datetime(quotes["date"]).dt.normalize()
+    quotes["market_iv"] = _normalize_percent(quotes["market_iv"])
+    quotes["horizon"] = quotes["dte"].map(lambda value: nearest_horizon(value, horizons))
+    aligned = quotes.groupby(["ticker", "date", "horizon"], as_index=False)["market_iv"].median()
+
+    joined = best.merge(aligned, on=["ticker", "date", "horizon"], how="inner")
+    if joined.empty:
+        return pd.DataFrame()
+    joined["vol_edge"] = joined["forecast_vol"] - joined["market_iv"]
+    realized_variance = np.square(joined["future_realized_vol"] / 100.0)
+    joined["forecast_variance_error"] = np.square(joined["forecast_vol"] / 100.0) - realized_variance
+    joined["market_variance_error"] = np.square(joined["market_iv"] / 100.0) - realized_variance
+    joined["direction_correct"] = (
+        np.sign(joined["vol_edge"]) == np.sign(joined["future_realized_vol"] - joined["market_iv"])
+    )
+
+    rows: list[dict] = []
+    total_by_ticker = joined.groupby("ticker").size().to_dict()
+    for ticker, group in joined.groupby("ticker"):
+        total = int(total_by_ticker.get(ticker, len(group)))
+        for threshold in sorted({float(value) for value in thresholds}):
+            subset = group[group["vol_edge"].abs() >= threshold]
+            n = int(len(subset))
+            if n == 0:
+                rows.append({
+                    "ticker": ticker, "min_abs_vol_edge_points": float(threshold), "observations": 0,
+                    "coverage_pct": 0.0, "directional_accuracy_vs_market_iv": np.nan,
+                    "mean_abs_vol_edge": np.nan, "forecast_variance_mse": np.nan,
+                    "market_variance_mse": np.nan, "variance_skill_vs_market": np.nan,
+                })
+                continue
+            forecast_mse = float(np.mean(np.square(subset["forecast_variance_error"])))
+            market_mse = float(np.mean(np.square(subset["market_variance_error"])))
+            rows.append({
+                "ticker": ticker,
+                "min_abs_vol_edge_points": float(threshold),
+                "observations": n,
+                "coverage_pct": float(n / total * 100.0),
+                "directional_accuracy_vs_market_iv": float(subset["direction_correct"].mean()),
+                "mean_abs_vol_edge": float(subset["vol_edge"].abs().mean()),
+                "forecast_variance_mse": forecast_mse,
+                "market_variance_mse": market_mse,
+                "variance_skill_vs_market": market_mse - forecast_mse,
+            })
+    return pd.DataFrame(rows).sort_values(["ticker", "min_abs_vol_edge_points"]).reset_index(drop=True)
+
+
 def _forecast_lookup(forecasts: pd.DataFrame) -> dict[tuple[str, int], pd.DataFrame]:
     best = forecasts[forecasts["model"] == "best_model"].copy()
     best["date"] = pd.to_datetime(best["date"]).dt.normalize()
