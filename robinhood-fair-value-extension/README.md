@@ -32,6 +32,11 @@ The model is European-style Black–Scholes. Most U.S. single-stock and ETF cont
 4. Select this entire `robinhood-fair-value-extension` folder.
 5. Open a Robinhood classic option chain for any available stock, ETF, or supported index.
 
+A packaged build is also provided as `robinhood-fair-value-overlay-1.5.0.zip`, containing
+`manifest.json`, `content.js`, `content.css`, `popup.html`, `popup.js`, and `popup.css`. To
+install from it, unzip the archive into a folder and **Load unpacked** that folder (Chrome
+cannot load a `.zip` directly in developer mode).
+
 When updating an already loaded copy, click the extension's **Reload** button on `chrome://extensions`, then refresh Robinhood.
 
 The floating panel appears at the lower left. Exact Mark/IV scanning starts automatically while a supported chain is open and repeats at the configured interval. **Refresh Mark IV now** remains available for an immediate pass. A scan only clicks strike labels to reveal public contract details; it never clicks Robinhood's green `+` order button.
