@@ -1,6 +1,6 @@
 {
   "schema": "volatility_forecast.v1",
-  "generated_at": "2026-08-06T18:43:49.155121+00:00",
+  "generated_at": "2026-08-06T19:08:24.929751+00:00",
   "volatility_unit": "annualized_percent",
   "variance_unit": "annualized_decimal_squared",
   "horizons": [
