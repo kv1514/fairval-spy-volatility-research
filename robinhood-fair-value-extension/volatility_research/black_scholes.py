@@ -86,19 +86,64 @@ def black_scholes_greeks(
     volatility_percent: pd.Series | np.ndarray,
     rate_percent: pd.Series | np.ndarray | float = 0.0,
     dividend_percent: pd.Series | np.ndarray | float = 0.0,
+    option_type: pd.Series | np.ndarray | str = "call",
 ) -> dict[str, np.ndarray]:
-    """Return gamma and vega; vega is dollars per one volatility point."""
+    """Return the standard European greeks.
+
+    Conventions: gamma and vega are identical for a call and a put, so they are
+    returned type-independently. Vega is dollars per one volatility point (a 1%
+    move in sigma). Theta is dollars of value lost per calendar day. Rho is
+    dollars per one percentage-point move in the rate. Delta, theta and rho
+    depend on the option type supplied.
+    """
 
     terms = _black_scholes_terms(
         spot, strike, dte, volatility_percent, rate_percent, dividend_percent,
     )
-    density = _normal_pdf(terms["d1"])
-    gamma = (
-        terms["discount_q"] * density
-        / (terms["spot"] * terms["sigma"] * terms["sqrt_time"])
-    )
-    vega = terms["spot"] * terms["discount_q"] * density * terms["sqrt_time"] / 100.0
-    return {"gamma": gamma, "vega": vega, "time_years": terms["time"]}
+    s, k = terms["spot"], terms["strike"]
+    t, sigma = terms["time"], terms["sigma"]
+    d1, d2 = terms["d1"], terms["d2"]
+    discount_r, discount_q = terms["discount_r"], terms["discount_q"]
+    sqrt_t = terms["sqrt_time"]
+    density = _normal_pdf(d1)
+    r = np.asarray(rate_percent, dtype=float) / 100.0
+    q = np.asarray(dividend_percent, dtype=float) / 100.0
+
+    gamma = discount_q * density / (s * sigma * sqrt_t)
+    vega = s * discount_q * density * sqrt_t / 100.0
+
+    is_put = np.char.lower(np.asarray(option_type, dtype=str)) == "put"
+    call_delta = discount_q * _normal_cdf(d1)
+    put_delta = -discount_q * _normal_cdf(-d1)
+    delta = np.where(is_put, put_delta, call_delta)
+
+    # Per-year theta, then converted to per-calendar-day (÷365) to match the
+    # calendar-time pricing convention used throughout the engine.
+    theta_common = -(s * discount_q * density * sigma) / (2.0 * sqrt_t)
+    call_theta = (
+        theta_common
+        - r * k * discount_r * _normal_cdf(d2)
+        + q * s * discount_q * _normal_cdf(d1)
+    ) / 365.0
+    put_theta = (
+        theta_common
+        + r * k * discount_r * _normal_cdf(-d2)
+        - q * s * discount_q * _normal_cdf(-d1)
+    ) / 365.0
+    theta = np.where(is_put, put_theta, call_theta)
+
+    call_rho = k * t * discount_r * _normal_cdf(d2) / 100.0
+    put_rho = -k * t * discount_r * _normal_cdf(-d2) / 100.0
+    rho = np.where(is_put, put_rho, call_rho)
+
+    return {
+        "gamma": gamma,
+        "vega": vega,
+        "delta": delta,
+        "theta": theta,
+        "rho": rho,
+        "time_years": t,
+    }
 
 
 def implied_volatility_percent(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from html import escape
 from pathlib import Path
+import re
 from typing import Iterable
 
 import numpy as np
@@ -163,12 +164,17 @@ def write_visualizations(
     else:
         chart4 = _empty_chart("EWMA lambda performance curve", "Not enough completed targets to tune lambda")
 
-    if not weights_history.empty:
+    weight_columns = [c for c in weights_history.columns if re.fullmatch(r"w\d+", c)] if not weights_history.empty else []
+    if weight_columns:
         chosen_horizon = 5 if (weights_history["horizon"] == 5).any() else int(weights_history["horizon"].iloc[0])
-        weights = weights_history[weights_history["horizon"] == chosen_horizon].groupby("date", as_index=False)[["w5", "w10", "w20", "w60"]].mean().sort_values("date")
+        weights = weights_history[weights_history["horizon"] == chosen_horizon].groupby("date", as_index=False)[weight_columns].mean().sort_values("date")
+        # Plot the windows the optimizer actually leaned on: the highest average
+        # weight columns from the broad candidate set (up to six for legibility).
+        ranked_columns = sorted(weight_columns, key=lambda c: float(weights[c].mean()), reverse=True)[:6]
+        ranked_columns = sorted(ranked_columns, key=lambda c: int(c[1:]))
         x5 = pd.to_datetime(weights["date"]).map(pd.Timestamp.toordinal).to_numpy(float)
-        series5 = [(f"w{window}", x5, weights[f"w{window}"].to_numpy(float)) for window in (5, 10, 20, 60)]
-        chart5 = _line_chart("Optimized blend weights over time", series5, "Date", "Variance weight", f"Horizon: {chosen_horizon} trading days · mean across available tickers")
+        series5 = [(f"vol_{column[1:]}", x5, weights[column].to_numpy(float)) for column in ranked_columns]
+        chart5 = _line_chart("Optimized blend weights over time", series5, "Date", "Variance weight", f"Horizon: {chosen_horizon} trading days · top candidate windows · mean across tickers")
     else:
         chart5 = _empty_chart("Optimized blend weights over time", "Not enough completed targets to optimize weights")
 

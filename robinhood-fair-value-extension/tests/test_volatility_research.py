@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 import unittest
@@ -13,13 +14,19 @@ import pandas as pd
 EXTENSION_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(EXTENSION_ROOT))
 
-from volatility_research.black_scholes import black_scholes_greeks, black_scholes_price  # noqa: E402
+from volatility_research.black_scholes import (  # noqa: E402
+    black_scholes_greeks,
+    black_scholes_price,
+    implied_volatility_percent,
+)
 from volatility_research.engine import (  # noqa: E402
     ForecastConfig,
     VolatilityResearchEngine,
     _ewma_volatility_paths,
     _future_realized_vol,
+    _sparse_variance_weights,
     diagnose_models_by_moneyness,
+    format_blend_formula,
     rank_option_contracts,
 )
 from volatility_research.surface import add_volatility_surface_context  # noqa: E402
@@ -75,9 +82,28 @@ class WalkForwardTests(unittest.TestCase):
         self.assertTrue((pd.to_datetime(self.forecasts["forecast_input_end"]) == pd.to_datetime(self.forecasts["date"])).all())
 
     def test_optimized_weights_are_nonnegative_and_sum_to_one(self) -> None:
-        weights = self.engine.weights_history_[["w5", "w10", "w20", "w60"]].to_numpy(float)
+        weight_columns = [c for c in self.engine.weights_history_.columns if re.fullmatch(r"w\d+", c)]
+        self.assertGreater(len(weight_columns), 4)  # a broad candidate window set, not just 5/10/20/60
+        weights = self.engine.weights_history_[weight_columns].to_numpy(float)
         self.assertTrue(np.all(weights >= -1e-12))
-        np.testing.assert_allclose(weights.sum(axis=1), 1.0, atol=1e-10)
+        np.testing.assert_allclose(weights.sum(axis=1), 1.0, atol=1e-9)
+
+    def test_sparse_blend_is_sparse_and_normalized(self) -> None:
+        cap = self.config.sparse_max_terms
+        # The pre-training warm-start is a uniform blend; the sparsity guarantee
+        # applies once the greedy selector has actually trained on completed targets.
+        trained = self.engine.weights_history_[self.engine.weights_history_["parameter_train_end"].notna()]
+        self.assertGreater(len(trained), 0)
+        for weights in trained["sparse_weights"]:
+            values = np.array([float(v) for v in weights.values()], dtype=float)
+            self.assertLessEqual(len(values), cap)  # cardinality cap: no useless windows
+            self.assertTrue(np.all(values > self.config.weight_zero_threshold))  # no dust weights
+            np.testing.assert_allclose(values.sum(), 1.0, atol=1e-9)
+        self.assertTrue((trained["sparse_n_terms"] <= cap).all())
+
+    def test_sparse_blend_forecasts_are_leakage_safe(self) -> None:
+        sparse = self.forecasts[self.forecasts["model"] == "sparse_blend"].dropna(subset=["parameter_train_end"])
+        self.assertTrue((pd.to_datetime(sparse["parameter_train_end"]) <= pd.to_datetime(sparse["date"])).all())
 
     def test_ewma_variance_stays_positive(self) -> None:
         returns = self.engine.price_features_["log_return"].to_numpy(float)
@@ -262,12 +288,92 @@ class SurfaceAndDiagnosticsTests(unittest.TestCase):
             "dte": 5, "option_type": "call", "strike": 500, "spot": 500, "market_iv": 20,
         })
         diagnostics = diagnose_models_by_moneyness(forecasts, history)
-        self.assertEqual(set(diagnostics["model"]), {"optimized_blend", "ewma", "realized_20", "realized_60"})
+        self.assertEqual(
+            set(diagnostics["model"]),
+            {"optimized_blend", "sparse_blend", "ewma", "realized_20", "realized_60"},
+        )
         winners = diagnostics[diagnostics["is_best"]]
         self.assertEqual(
             len(winners),
             diagnostics[["ticker", "horizon", "moneyness_bucket"]].drop_duplicates().shape[0],
         )
+
+
+class BlackScholesPropertyTests(unittest.TestCase):
+    S, K, DTE, VOL, R, Q = 100.0, 100.0, 30.0, 22.0, 4.0, 1.5
+
+    def test_put_call_parity(self) -> None:
+        call = float(black_scholes_price(self.S, self.K, self.DTE, self.VOL, self.R, self.Q, "call"))
+        put = float(black_scholes_price(self.S, self.K, self.DTE, self.VOL, self.R, self.Q, "put"))
+        t = self.DTE / 365.0
+        expected = self.S * np.exp(-self.Q / 100.0 * t) - self.K * np.exp(-self.R / 100.0 * t)
+        self.assertAlmostEqual(call - put, expected, places=6)
+
+    def test_call_increases_and_put_decreases_with_spot(self) -> None:
+        call_lo = float(black_scholes_price(95, self.K, self.DTE, self.VOL, self.R, self.Q, "call"))
+        call_hi = float(black_scholes_price(105, self.K, self.DTE, self.VOL, self.R, self.Q, "call"))
+        put_lo = float(black_scholes_price(95, self.K, self.DTE, self.VOL, self.R, self.Q, "put"))
+        put_hi = float(black_scholes_price(105, self.K, self.DTE, self.VOL, self.R, self.Q, "put"))
+        self.assertGreater(call_hi, call_lo)
+        self.assertLess(put_hi, put_lo)
+
+    def test_price_increases_with_volatility(self) -> None:
+        for option_type in ("call", "put"):
+            low = float(black_scholes_price(self.S, self.K, self.DTE, 15.0, self.R, self.Q, option_type))
+            high = float(black_scholes_price(self.S, self.K, self.DTE, 35.0, self.R, self.Q, option_type))
+            self.assertGreater(high, low)
+
+    def test_iv_solver_recovers_known_sigma(self) -> None:
+        for sigma in (12.0, 27.5, 60.0):
+            price = float(black_scholes_price(self.S, self.K, self.DTE, sigma, self.R, self.Q, "call"))
+            recovered = implied_volatility_percent(price, self.S, self.K, self.DTE, "call", self.R, self.Q)
+            self.assertAlmostEqual(recovered, sigma, places=4)
+
+    def test_gamma_and_vega_are_equal_for_call_and_put(self) -> None:
+        call = black_scholes_greeks(self.S, self.K, self.DTE, self.VOL, self.R, self.Q, "call")
+        put = black_scholes_greeks(self.S, self.K, self.DTE, self.VOL, self.R, self.Q, "put")
+        self.assertAlmostEqual(float(call["gamma"]), float(put["gamma"]), places=12)
+        self.assertAlmostEqual(float(call["vega"]), float(put["vega"]), places=12)
+
+    def test_delta_theta_rho_are_finite_and_signed(self) -> None:
+        call = black_scholes_greeks(self.S, self.K, self.DTE, self.VOL, self.R, self.Q, "call")
+        put = black_scholes_greeks(self.S, self.K, self.DTE, self.VOL, self.R, self.Q, "put")
+        for greeks in (call, put):
+            for key in ("delta", "theta", "rho", "gamma", "vega"):
+                self.assertTrue(np.isfinite(float(greeks[key])))
+        self.assertGreater(float(call["delta"]), 0.0)  # long call is positive delta
+        self.assertLess(float(put["delta"]), 0.0)  # long put is negative delta
+        self.assertGreater(float(call["rho"]), 0.0)  # call gains when rates rise
+        self.assertLess(float(put["rho"]), 0.0)  # put loses when rates rise
+
+
+class SparseBlendTests(unittest.TestCase):
+    def test_sparse_selection_respects_cardinality_and_threshold(self) -> None:
+        rng = np.arange(400, dtype=float)
+        # A target that only two windows can explain well; the sparse selector
+        # should not pad the blend with additional, useless windows.
+        features = np.column_stack([
+            18 + 3 * np.sin(rng / 5),
+            18 + 3 * np.sin(rng / 5) + 0.2 * np.cos(rng / 11),
+            40 + 10 * np.cos(rng / 30),
+            25 + np.zeros_like(rng),
+        ])
+        target = 18 + 3 * np.sin(rng / 5)
+        config = ForecastConfig(sparse_max_terms=2)
+        weights = _sparse_variance_weights(features, target, config)
+        nonzero = weights[weights > config.weight_zero_threshold]
+        self.assertLessEqual(np.count_nonzero(weights > config.weight_zero_threshold), 2)
+        self.assertTrue(np.all(nonzero > 0))
+        self.assertAlmostEqual(float(weights.sum()), 1.0, places=9)
+        # No weight should linger in the dust band between 0 and the threshold.
+        self.assertFalse(np.any((weights > 0) & (weights < config.weight_zero_threshold)))
+
+    def test_blend_formula_is_readable_and_drops_dust(self) -> None:
+        formula = format_blend_formula({"5": 0.6, "20": 0.4, "60": 1e-12})
+        self.assertTrue(formula.startswith("sqrt("))
+        self.assertIn("0.60*vol_5", formula)
+        self.assertIn("0.40*vol_20", formula)
+        self.assertNotIn("vol_60", formula)  # negligible weight is dropped
 
 
 if __name__ == "__main__":

@@ -15,10 +15,22 @@ from .surface import add_volatility_surface_context, prepare_surface_contracts, 
 
 
 TRADING_DAYS = 252.0
-VOL_WINDOWS = (5, 10, 20, 60)
+# Named baseline realized-vol windows kept for reporting, the fixed blend, and
+# the realized_N models. These are a small, human-recognizable subset.
+REPORT_WINDOWS = (5, 10, 20, 60)
+# Broad, configurable candidate set the blends may draw from. It spans very
+# short (1D) to roughly a quarter (60D). Fine granularity at the short end lets
+# the sparse model test whether recent volatility dominates the 1D/2D horizons.
+# The optimizer/sparse selector decide which windows are actually useful out of
+# sample; the set is configurable (extendable toward 100D) via ForecastConfig.
+CANDIDATE_WINDOWS = (1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 45, 60)
+VOL_WINDOWS = REPORT_WINDOWS  # backwards-compatible alias for the baseline set
 DEFAULT_HORIZONS = (1, 2, 3, 5, 10)
 FIXED_WEIGHTS = np.array([0.40, 0.30, 0.20, 0.10], dtype=float)
-MODEL_NAMES = ("realized_5", "realized_10", "realized_20", "realized_60", "fixed_blend", "optimized_blend", "ewma")
+MODEL_NAMES = (
+    "realized_5", "realized_10", "realized_20", "realized_60",
+    "fixed_blend", "optimized_blend", "sparse_blend", "ewma",
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +42,11 @@ class ForecastConfig:
     ewma_default_lambda: float = 0.94
     optimizer_max_iterations: int = 5_000
     optimizer_tolerance: float = 1e-12
+    vol_windows: tuple[int, ...] = CANDIDATE_WINDOWS
+    sparse_max_terms: int = 3
+    weight_zero_threshold: float = 1e-8
+    projected_gradient_iterations: int = 400
+    projected_gradient_tolerance: float = 1e-13
 
 
 def _validate_columns(frame: pd.DataFrame, required: Iterable[str], label: str) -> None:
@@ -62,47 +79,164 @@ def _project_simplex(values: np.ndarray) -> np.ndarray:
     return projected / projected.sum()
 
 
+def _variance_design(
+    volatility_features: np.ndarray,
+    target_volatility: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return finite variance-space design matrix and target (percent -> decimal)."""
+
+    x = np.square(np.asarray(volatility_features, dtype=float) / 100.0)
+    y = np.square(np.asarray(target_volatility, dtype=float) / 100.0)
+    mask = np.isfinite(x).all(axis=1) & np.isfinite(y)
+    return x[mask], y[mask]
+
+
+def _equality_constrained_weights(gram_active: np.ndarray, rhs_active: np.ndarray) -> np.ndarray | None:
+    """Least-squares weights on the active columns constrained to sum to one.
+
+    Works from a precomputed Gram matrix (XᵀX) and cross term (Xᵀy) sliced to the
+    active columns. Returns None when the solution is materially negative, so the
+    caller can fall back to a projection.
+    """
+
+    columns = gram_active.shape[0]
+    kkt = np.block([
+        [gram_active, np.ones((columns, 1))],
+        [np.ones((1, columns)), np.zeros((1, 1))],
+    ])
+    solution = np.linalg.lstsq(kkt, np.append(rhs_active, 1.0), rcond=None)[0][:columns]
+    if np.any(solution < -1e-9):
+        return None
+    return np.maximum(solution, 0.0)
+
+
+def _uniform_weights(feature_count: int) -> np.ndarray:
+    return np.full(feature_count, 1.0 / feature_count, dtype=float)
+
+
 def _optimize_variance_weights(
     volatility_features: np.ndarray,
     target_volatility: np.ndarray,
     config: ForecastConfig,
 ) -> np.ndarray:
-    """Minimize training MSE in annualized variance under simplex constraints."""
+    """Dense simplex-constrained variance blend over all candidate windows.
 
-    x = np.square(np.asarray(volatility_features, dtype=float) / 100.0)
-    y = np.square(np.asarray(target_volatility, dtype=float) / 100.0)
-    mask = np.isfinite(x).all(axis=1) & np.isfinite(y)
-    x = x[mask]
-    y = y[mask]
+    Minimizes mean squared error in annualized variance by projected gradient
+    descent onto the probability simplex. Projected gradient scales to a broad
+    candidate set (unlike an exhaustive 2^k active-set search) and is fully
+    deterministic given the training slice, preserving the walk-forward
+    leakage guarantee.
+    """
+
+    x, y = _variance_design(volatility_features, target_volatility)
+    feature_count = volatility_features.shape[1]
     if x.shape[0] < 2:
-        return FIXED_WEIGHTS.copy()
-    # Four features permit an exact active-set search over all 15 nonempty
-    # subsets. Each subset solves equality-constrained least squares; infeasible
-    # negative solutions are discarded. This is deterministic and much faster
-    # than thousands of projected-gradient iterations at every rebalance.
-    best_weights = FIXED_WEIGHTS.copy()
-    best_loss = float(np.mean(np.square(x @ best_weights - y)))
-    feature_count = x.shape[1]
-    for mask in range(1, 1 << feature_count):
-        active = np.array([index for index in range(feature_count) if mask & (1 << index)], dtype=int)
-        local = x[:, active]
-        gram = local.T @ local
-        rhs = local.T @ y
-        kkt = np.block([
-            [gram, np.ones((len(active), 1))],
-            [np.ones((1, len(active))), np.zeros((1, 1))],
-        ])
-        solution = np.linalg.lstsq(kkt, np.append(rhs, 1.0), rcond=None)[0][:-1]
-        if np.any(solution < -config.optimizer_tolerance):
-            continue
-        candidate = np.zeros(feature_count, dtype=float)
-        candidate[active] = np.maximum(solution, 0.0)
-        candidate = _project_simplex(candidate)
-        loss = float(np.mean(np.square(x @ candidate - y)))
-        if loss < best_loss:
-            best_loss = loss
-            best_weights = candidate
-    return best_weights
+        return _uniform_weights(feature_count)
+    # Precompute the Hessian A = (2/n) XᵀX and b = (2/n) Xᵀy once. The gradient
+    # is then A·w - b, a tiny k×k matvec per iteration instead of an O(n·k)
+    # product, which keeps the walk-forward run fast over a broad window set.
+    scale = 2.0 / x.shape[0]
+    hessian = scale * (x.T @ x)
+    linear = scale * (x.T @ y)
+    largest_eigenvalue = float(np.linalg.eigvalsh(hessian)[-1])
+    if not np.isfinite(largest_eigenvalue) or largest_eigenvalue <= 1e-18:
+        return _uniform_weights(feature_count)
+    step = 1.0 / largest_eigenvalue
+    weights = _uniform_weights(feature_count)
+    for _ in range(max(config.projected_gradient_iterations, 1)):
+        gradient = hessian @ weights - linear
+        moved = _project_simplex(weights - step * gradient)
+        if np.max(np.abs(moved - weights)) < config.projected_gradient_tolerance:
+            weights = moved
+            break
+        weights = moved
+    return weights
+
+
+def _sparse_variance_weights(
+    volatility_features: np.ndarray,
+    target_volatility: np.ndarray,
+    config: ForecastConfig,
+) -> np.ndarray:
+    """Greedy forward-selected sparse variance blend.
+
+    Starting from no windows, repeatedly add the single candidate window that
+    most reduces training variance MSE, refitting simplex-constrained weights on
+    the chosen subset each step. Selection stops at ``sparse_max_terms`` windows
+    or when no window materially improves the fit. Weights below
+    ``weight_zero_threshold`` are dropped so unused windows carry exactly zero
+    weight. Deterministic given the training slice.
+    """
+
+    x, y = _variance_design(volatility_features, target_volatility)
+    feature_count = volatility_features.shape[1]
+    if x.shape[0] < 2:
+        return _uniform_weights(feature_count)
+    # Precompute the Gram matrix and cross term once so each candidate fit is a
+    # small sliced solve and each loss is a quadratic form, not an O(n·k) product.
+    gram = x.T @ x
+    cross = x.T @ y
+    yty = float(y @ y)
+    rows = x.shape[0]
+
+    def _loss(weights: np.ndarray) -> float:
+        return float((weights @ gram @ weights - 2.0 * weights @ cross + yty) / rows)
+
+    max_terms = max(1, min(config.sparse_max_terms, feature_count))
+    chosen: list[int] = []
+    best_weights = _uniform_weights(feature_count)
+    best_loss = float("inf")
+    while len(chosen) < max_terms:
+        step_best_loss = best_loss
+        step_best_index: int | None = None
+        step_best_weights: np.ndarray | None = None
+        for candidate_index in range(feature_count):
+            if candidate_index in chosen:
+                continue
+            active = np.array(sorted(chosen + [candidate_index]), dtype=int)
+            solution = _equality_constrained_weights(gram[np.ix_(active, active)], cross[active])
+            weights = np.zeros(feature_count, dtype=float)
+            weights[active] = solution if solution is not None else _project_simplex(np.ones(len(active)))
+            loss = _loss(weights)
+            if loss < step_best_loss - 1e-15:
+                step_best_loss = loss
+                step_best_index = candidate_index
+                step_best_weights = weights
+        if step_best_index is None or step_best_weights is None:
+            break
+        chosen.append(step_best_index)
+        best_loss = step_best_loss
+        best_weights = step_best_weights
+    zeroed = np.where(best_weights < config.weight_zero_threshold, 0.0, best_weights)
+    if zeroed.sum() <= 0:
+        return _uniform_weights(feature_count)
+    return zeroed / zeroed.sum()
+
+
+def _weights_dict(windows: Iterable[int], weights: np.ndarray, threshold: float = 1e-8) -> dict[str, float]:
+    """Return only the non-negligible window weights, keyed by window string."""
+
+    return {
+        str(int(window)): float(weight)
+        for window, weight in zip(windows, np.asarray(weights, dtype=float))
+        if float(weight) > threshold
+    }
+
+
+def format_blend_formula(weights: dict[str, float] | None, threshold: float = 1e-8) -> str:
+    """Render a readable variance-blend formula, e.g. sqrt(0.55*vol_60² + ...)."""
+
+    if not weights:
+        return "-"
+    terms = sorted(
+        ((str(window), float(weight)) for window, weight in weights.items() if float(weight) > threshold),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    if not terms:
+        return "-"
+    body = " + ".join(f"{weight:.2f}*vol_{window}²" for window, weight in terms)
+    return f"sqrt({body})"
 
 
 def _future_realized_vol(returns: np.ndarray, start_index: int, horizon: int) -> float:
@@ -164,14 +298,28 @@ class VolatilityResearchEngine:
         self.model_selection_history_: pd.DataFrame = pd.DataFrame()
         self.price_features_: pd.DataFrame = pd.DataFrame()
 
+    @property
+    def _candidate_windows(self) -> tuple[int, ...]:
+        return tuple(sorted({int(window) for window in self.config.vol_windows if int(window) >= 1}))
+
+    @property
+    def _all_windows(self) -> tuple[int, ...]:
+        return tuple(sorted(set(self._candidate_windows) | set(REPORT_WINDOWS)))
+
     def _prepare_ticker(self, ticker: str, frame: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
         local = frame.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True).copy()
         local["log_return"] = np.log(local["close"] / local["close"].shift(1))
-        for window in VOL_WINDOWS:
-            local[f"vol_{window}"] = local["log_return"].rolling(window).std(ddof=1) * np.sqrt(TRADING_DAYS) * 100.0
+        for window in self._all_windows:
+            if window <= 1:
+                # A one-observation sample standard deviation is undefined; the
+                # absolute daily return is the standard 1-day realized-vol proxy
+                # (the same convention used for the h=1 forecast target).
+                local[f"vol_{window}"] = local["log_return"].abs() * np.sqrt(TRADING_DAYS) * 100.0
+            else:
+                local[f"vol_{window}"] = local["log_return"].rolling(window).std(ddof=1) * np.sqrt(TRADING_DAYS) * 100.0
         local["fixed_blend"] = np.sqrt(sum(
             weight * np.square(local[f"vol_{window}"])
-            for weight, window in zip(FIXED_WEIGHTS, VOL_WINDOWS, strict=True)
+            for weight, window in zip(FIXED_WEIGHTS, REPORT_WINDOWS, strict=True)
         ))
         all_lambdas = np.round(np.arange(0.700, 0.9901, 0.001), 3)
         paths = _ewma_volatility_paths(local["log_return"].to_numpy(), all_lambdas)
@@ -198,8 +346,10 @@ class VolatilityResearchEngine:
             feature_frames.append(base.copy())
             returns = base["log_return"].to_numpy()
             dates = base["date"].to_numpy()
+            candidate_windows = self._candidate_windows
+            all_windows = self._all_windows
             for horizon in self.config.horizons:
-                panel = base[["ticker", "date", "close", *(f"vol_{window}" for window in VOL_WINDOWS), "fixed_blend"]].copy()
+                panel = base[["ticker", "date", "close", *(f"vol_{window}" for window in all_windows), "fixed_blend"]].copy()
                 panel["horizon"] = int(horizon)
                 panel["target_future_vol"] = [
                     _future_realized_vol(returns, index, int(horizon)) for index in range(len(panel))
@@ -210,8 +360,8 @@ class VolatilityResearchEngine:
                     if index + int(horizon) < len(panel):
                         panel.at[index, "target_start_date"] = pd.Timestamp(dates[index + 1])
                         panel.at[index, "target_end_date"] = pd.Timestamp(dates[index + int(horizon)])
-                panel = panel.dropna(subset=[*(f"vol_{window}" for window in VOL_WINDOWS)]).reset_index(drop=True)
-                for window in VOL_WINDOWS:
+                panel = panel.dropna(subset=[*(f"vol_{window}" for window in all_windows)]).reset_index(drop=True)
+                for window in REPORT_WINDOWS:
                     panel[f"realized_{window}"] = panel[f"vol_{window}"]
                 position_by_date = {pd.Timestamp(value): position for position, value in enumerate(base["date"])}
                 original_indices = [position_by_date[pd.Timestamp(value)] for value in panel["date"]]
@@ -224,10 +374,14 @@ class VolatilityResearchEngine:
                 optimized_values: list[float] = []
                 optimized_weights: list[dict] = []
                 optimized_train_end: list[pd.Timestamp | pd.NaT] = []
+                sparse_values: list[float] = []
+                sparse_weights_list: list[dict] = []
+                sparse_train_end: list[pd.Timestamp | pd.NaT] = []
                 ewma_values: list[float] = []
                 ewma_lambdas: list[float] = []
                 ewma_train_end: list[pd.Timestamp | pd.NaT] = []
-                last_weights = FIXED_WEIGHTS.copy()
+                last_weights = _uniform_weights(len(candidate_windows))
+                last_sparse_weights = _uniform_weights(len(candidate_windows))
                 last_weight_train_end = pd.NaT
                 last_lambda = float(self.config.ewma_default_lambda)
                 last_lambda_train_end = pd.NaT
@@ -237,20 +391,26 @@ class VolatilityResearchEngine:
                     training = _training_rows(panel.iloc[:position], origin, self.config)
                     rebalance = position % max(self.config.rebalance_every, 1) == 0
                     if rebalance and len(training) >= self.config.min_train_observations:
-                        features = training[[f"vol_{window}" for window in VOL_WINDOWS]].to_numpy(dtype=float)
+                        features = training[[f"vol_{window}" for window in candidate_windows]].to_numpy(dtype=float)
                         targets = training["target_future_vol"].to_numpy(dtype=float)
                         last_weights = _optimize_variance_weights(features, targets, self.config)
+                        last_sparse_weights = _sparse_variance_weights(features, targets, self.config)
                         last_weight_train_end = pd.Timestamp(training["target_end_date"].max())
-                    feature_vector = row[[f"vol_{window}" for window in VOL_WINDOWS]].to_numpy(dtype=float)
+                    feature_vector = row[[f"vol_{window}" for window in candidate_windows]].to_numpy(dtype=float)
                     optimized_values.append(float(np.sqrt(np.dot(last_weights, np.square(feature_vector)))))
-                    weight_dict = {str(window): float(weight) for window, weight in zip(VOL_WINDOWS, last_weights, strict=True)}
-                    optimized_weights.append(weight_dict)
+                    sparse_values.append(float(np.sqrt(np.dot(last_sparse_weights, np.square(feature_vector)))))
+                    optimized_weights.append(_weights_dict(candidate_windows, last_weights))
+                    sparse_weights_list.append(_weights_dict(candidate_windows, last_sparse_weights))
                     optimized_train_end.append(last_weight_train_end)
+                    sparse_train_end.append(last_weight_train_end)
                     weight_rows.append({
                         "ticker": ticker,
                         "date": origin,
                         "horizon": int(horizon),
-                        **{f"w{window}": float(weight) for window, weight in zip(VOL_WINDOWS, last_weights, strict=True)},
+                        **{f"w{window}": float(weight) for window, weight in zip(candidate_windows, last_weights, strict=True)},
+                        "optimized_weights": _weights_dict(candidate_windows, last_weights),
+                        "sparse_weights": _weights_dict(candidate_windows, last_sparse_weights),
+                        "sparse_n_terms": int(np.count_nonzero(last_sparse_weights > self.config.weight_zero_threshold)),
                         "parameter_train_end": last_weight_train_end,
                         "n_train": len(training),
                     })
@@ -293,6 +453,9 @@ class VolatilityResearchEngine:
                 panel["optimized_blend"] = optimized_values
                 panel["optimized_weights"] = optimized_weights
                 panel["optimized_train_end"] = optimized_train_end
+                panel["sparse_blend"] = sparse_values
+                panel["sparse_weights"] = sparse_weights_list
+                panel["sparse_train_end"] = sparse_train_end
                 panel["ewma"] = ewma_values
                 panel["ewma_lambda"] = ewma_lambdas
                 panel["ewma_train_end"] = ewma_train_end
@@ -340,22 +503,39 @@ class VolatilityResearchEngine:
                         "target_end_date": row["target_end_date"],
                         "future_realized_vol": row["target_future_vol"],
                     }
+                    fixed_weights_dict = {
+                        str(window): float(weight)
+                        for window, weight in zip(REPORT_WINDOWS, FIXED_WEIGHTS, strict=True)
+                    }
+
+                    def _weights_for(model: str) -> dict | None:
+                        if model == "optimized_blend":
+                            return row["optimized_weights"]
+                        if model == "sparse_blend":
+                            return row["sparse_weights"]
+                        if model == "fixed_blend":
+                            return fixed_weights_dict
+                        return None
+
+                    def _param_end_for(model: str):
+                        if model == "ewma":
+                            return row["ewma_train_end"]
+                        if model == "optimized_blend":
+                            return row["optimized_train_end"]
+                        if model == "sparse_blend":
+                            return row["sparse_train_end"]
+                        return pd.NaT
+
                     for model in MODEL_NAMES:
-                        record = {
+                        output_rows.append({
                             **common,
                             "model": model,
                             "model_used": model,
                             "forecast_vol": float(row[model]),
                             "lambda_used": float(row["ewma_lambda"]) if model == "ewma" else np.nan,
-                            "weights_used": row["optimized_weights"] if model == "optimized_blend" else (
-                                {str(window): float(weight) for window, weight in zip(VOL_WINDOWS, FIXED_WEIGHTS, strict=True)}
-                                if model == "fixed_blend" else None
-                            ),
-                            "parameter_train_end": row["ewma_train_end"] if model == "ewma" else (
-                                row["optimized_train_end"] if model == "optimized_blend" else pd.NaT
-                            ),
-                        }
-                        output_rows.append(record)
+                            "weights_used": _weights_for(model),
+                            "parameter_train_end": _param_end_for(model),
+                        })
                     selected = str(row["selected_model"])
                     output_rows.append({
                         **common,
@@ -363,10 +543,7 @@ class VolatilityResearchEngine:
                         "model_used": selected,
                         "forecast_vol": float(row[selected]),
                         "lambda_used": float(row["ewma_lambda"]) if selected == "ewma" else np.nan,
-                        "weights_used": row["optimized_weights"] if selected == "optimized_blend" else (
-                            {str(window): float(weight) for window, weight in zip(VOL_WINDOWS, FIXED_WEIGHTS, strict=True)}
-                            if selected == "fixed_blend" else None
-                        ),
+                        "weights_used": _weights_for(selected),
                         "parameter_train_end": row["selection_train_end"],
                     })
 
@@ -421,7 +598,7 @@ def evaluate_forecasts(
 def diagnose_models_by_moneyness(
     forecasts: pd.DataFrame,
     option_history: pd.DataFrame | None = None,
-    models: Iterable[str] = ("optimized_blend", "ewma", "realized_20", "realized_60"),
+    models: Iterable[str] = ("optimized_blend", "sparse_blend", "ewma", "realized_20", "realized_60"),
     horizons: Iterable[int] = DEFAULT_HORIZONS,
 ) -> pd.DataFrame:
     """Compare requested models on out-of-sample variance loss by ticker/horizon/bucket."""
@@ -562,10 +739,13 @@ def rank_option_contracts(
     ranked["variance_edge"] = ranked["implied_variance"] - ranked["forecast_variance"]
     greeks = black_scholes_greeks(
         ranked["spot"], ranked["strike"], ranked["dte"], ranked["market_iv"],
-        ranked["rate"], ranked["dividend"],
+        ranked["rate"], ranked["dividend"], ranked["option_type"],
     )
     ranked["gamma"] = greeks["gamma"]
     ranked["vega"] = greeks["vega"]
+    ranked["delta"] = greeks["delta"]
+    ranked["theta"] = greeks["theta"]
+    ranked["rho"] = greeks["rho"]
     ranked["dollar_gamma"] = 0.5 * np.square(ranked["spot"]) * ranked["gamma"]
     ranked["gamma_weighted_edge"] = (
         ranked["dollar_gamma"] * ranked["variance_edge"] * greeks["time_years"]
@@ -684,7 +864,8 @@ def rank_option_contracts(
         "forecast_as_of", "forecast_horizon", "spot", "rate", "dividend", "research_direction",
         "edge_after_bid_ask", "edge_after_bid_ask_pct", "liquidity_pass", "composite_score",
         "research_bucket", "contract_rank", "future_realized_vol", "direction_correct_vs_market_iv",
-        "gamma", "vega", "gamma_weighted_edge_contract", "contract_multiplier", "candidate_side",
+        "delta", "gamma", "theta", "vega", "rho",
+        "gamma_weighted_edge_contract", "contract_multiplier", "candidate_side",
         "moneyness", "log_moneyness", "moneyness_bucket", "dte_bucket", "atm_iv",
         "contract_iv_minus_atm_iv", "iv_skew_slope_per_10pct_moneyness",
         "atm_iv_1d", "atm_iv_2d", "atm_iv_5d", "atm_iv_10d",

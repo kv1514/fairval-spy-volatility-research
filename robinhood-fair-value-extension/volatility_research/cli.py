@@ -90,6 +90,7 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     )
     write_variance_diagnostics_report(
         paths["diagnostics_report"], diagnostics, rankings, forecast_rows=len(forecasts),
+        weights_history=engine.weights_history_,
     )
     write_visualizations(output / "visualizations", forecasts, evaluation, engine.lambda_performance_, engine.weights_history_, rankings)
     return paths

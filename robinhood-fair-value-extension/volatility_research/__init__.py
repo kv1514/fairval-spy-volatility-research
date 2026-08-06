@@ -5,6 +5,7 @@ from .engine import (
     VolatilityResearchEngine,
     diagnose_models_by_moneyness,
     evaluate_forecasts,
+    format_blend_formula,
     latest_forecast_payload,
     rank_option_contracts,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "add_volatility_surface_context",
     "diagnose_models_by_moneyness",
     "evaluate_forecasts",
+    "format_blend_formula",
     "latest_forecast_payload",
     "rank_option_contracts",
 ]

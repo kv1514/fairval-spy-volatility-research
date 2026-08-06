@@ -8,9 +8,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .engine import format_blend_formula
+
 
 MODEL_COLORS = {
     "optimized_blend": "#147d64",
+    "sparse_blend": "#0b7285",
     "ewma": "#3155a4",
     "realized_20": "#9a5b13",
     "realized_60": "#783d8f",
@@ -27,11 +30,54 @@ def _table(headers: list[str], rows: list[list[str]], classes: str = "") -> str:
     return f'<div class="table-wrap"><table class="{escape(classes)}"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
+def _all_models_table(diagnostics: pd.DataFrame) -> str:
+    """Every candidate model's out-of-sample variance error, not just the winner."""
+
+    if diagnostics.empty:
+        return '<p class="muted">No completed diagnostic groups.</p>'
+    aggregate = diagnostics[diagnostics["moneyness_bucket"] == "all"].copy()
+    if aggregate.empty:
+        return '<p class="muted">No completed diagnostic groups.</p>'
+    rows: list[list[str]] = []
+    for row in aggregate.sort_values(["ticker", "horizon", "mse_variance"]).itertuples(index=False):
+        color = MODEL_COLORS.get(row.model, "#59636d")
+        marker = ' <b style="color:#147d64">◄ best</b>' if bool(row.is_best) else ""
+        rows.append([
+            escape(str(row.ticker)), str(int(row.horizon)),
+            f'<span class="model-pill" style="--pill:{color}">{escape(str(row.model))}</span>{marker}',
+            f"{int(row.observations):,}", _number(row.mse_variance, 6), _number(row.mae_vol, 4),
+        ])
+    return _table(["Ticker", "Horizon", "Candidate model", "OOS n", "Variance MSE", "Vol MAE"], rows)
+
+
+def _formula_table(weights_history: pd.DataFrame | None) -> str:
+    """Latest readable optimized and sparse blend formulas per ticker/horizon."""
+
+    if weights_history is None or weights_history.empty:
+        return '<p class="muted">No optimized blend weights were trained in this run.</p>'
+    frame = weights_history.copy()
+    frame["date"] = pd.to_datetime(frame["date"])
+    latest = frame.sort_values("date").groupby(["ticker", "horizon"], as_index=False).tail(1)
+    rows: list[list[str]] = []
+    for row in latest.sort_values(["ticker", "horizon"]).itertuples(index=False):
+        optimized = getattr(row, "optimized_weights", None)
+        sparse = getattr(row, "sparse_weights", None)
+        rows.append([
+            escape(str(row.ticker)), str(int(row.horizon)),
+            f'<code>{escape(format_blend_formula(optimized if isinstance(optimized, dict) else None))}</code>',
+            f'<code>{escape(format_blend_formula(sparse if isinstance(sparse, dict) else None))}</code>',
+        ])
+    if not rows:
+        return '<p class="muted">No optimized blend weights were trained in this run.</p>'
+    return _table(["Ticker", "Horizon", "Optimized blend (dense)", "Sparse blend (selected windows)"], rows)
+
+
 def write_variance_diagnostics_report(
     output_path: str | Path,
     diagnostics: pd.DataFrame,
     rankings: pd.DataFrame,
     forecast_rows: int,
+    weights_history: pd.DataFrame | None = None,
     source_pdf: str = "Martin Haugh, The Black-Scholes Model, equation (24), page 12",
 ) -> Path:
     target = Path(output_path)
@@ -104,6 +150,9 @@ def write_variance_diagnostics_report(
         candidate_rows,
     ) if candidate_rows else '<p class="muted">No contracts passed the current research queue gates.</p>'
 
+    all_models_table = _all_models_table(diagnostics)
+    formula_table = _formula_table(weights_history)
+
     html = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Variance Mispricing Diagnostics</title>
@@ -130,6 +179,8 @@ th:first-child,td:first-child{{text-align:left}}.model-pill{{display:inline-bloc
 <section><div class="grid"><div class="panel"><h2>Best model count</h2><p class="muted">Winner across ticker/horizon aggregate cells, selected only by past out-of-sample variance MSE.</p>{bars}</div>
 <div class="panel"><h2>Interpretation guardrails</h2><ul><li>Variance fields use annualized decimal variance, not squared percentage points.</li><li>High downside-put IV is not an automatic short: the IV percentile must be high versus the same ticker, option type, DTE and moneyness bucket.</li><li>Positive model price edge supports long-option research; positive gamma-weighted edge supports short-vol research.</li><li>Current live quotes are not outcomes. They cannot validate profitability until their future realized window completes.</li></ul></div></div></section>
 <section><h2>Best forecast by ticker and horizon</h2>{aggregate_table}</section>
+<section><h2>All candidate models by ticker and horizon</h2><p class="muted">Every model is scored on the same out-of-sample completed targets. The winner is the lowest variance MSE; alternatives are shown so the margin is visible.</p>{all_models_table}</section>
+<section><h2>Latest blend formulas</h2><p class="muted">The dense optimized blend spreads variance weight across the candidate windows; the sparse blend keeps only the few windows that earn their place (weights below 1e-8 are dropped).</p>{formula_table}</section>
 <section><h2>Best forecast by moneyness bucket</h2><p class="muted">A bucket changes the set of dates evaluated; it does not make an underlying-volatility forecast strike-specific.</p>{bucket_table}</section>
 <section><h2>Current research queue</h2><p class="muted">Candidates are prioritized for further review, not recommended trades.</p>{candidates_table}</section>
 <section class="sources"><h2>Sources and limitations</h2><p><strong>Model source:</strong> {escape(source_pdf)}. <strong>Market data:</strong> included Robinhood daily bars, live option quote snapshot, and historical hourly last-trade replay. The replay lacks historical NBBO, so inverted historical IV percentiles are screen-grade rather than execution-grade.</p></section>

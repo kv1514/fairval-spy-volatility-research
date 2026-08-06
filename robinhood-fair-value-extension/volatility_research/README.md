@@ -12,15 +12,24 @@ r_t = ln(close_t / close_(t-1))
 
 Annualized realized volatility is expressed in percent. The engine evaluates horizons `1, 2, 3, 5, 10` trading days and creates these model rows:
 
-- `realized_5`, `realized_10`, `realized_20`, and `realized_60`
-- `fixed_blend`, with variance weights `0.40, 0.30, 0.20, 0.10`
-- `optimized_blend`, with nonnegative variance weights that sum to one
+- `realized_5`, `realized_10`, `realized_20`, and `realized_60` — named realized-volatility baselines
+- `fixed_blend`, with variance weights `0.40, 0.30, 0.20, 0.10` on the 5/10/20/60 windows
+- `optimized_blend` — a **dense** variance blend fitted by projected-gradient descent over the full candidate window set, with nonnegative weights that sum to one
+- `sparse_blend` — a **sparse** variance blend built by greedy forward selection; it adds one window at a time only while training variance MSE keeps improving, is capped at `sparse_max_terms` windows (default 3), and drops any weight below `weight_zero_threshold` (`1e-8`) so unused windows carry exactly zero weight
 - `ewma`, with lambda selected from a coarse `0.70..0.99` grid and a `0.001` fine grid around the coarse winner
 - `best_model`, selected by past out-of-sample variance MSE for that ticker and horizon:
 
 ```text
 mean(((forecast_vol / 100)^2 - (future_realized_vol / 100)^2)^2)
 ```
+
+### Flexible candidate windows
+
+The blends do **not** rely on four hardcoded windows. `ForecastConfig.vol_windows` supplies a broad candidate set — `1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 45, 60` by default — and the optimizer and sparse selector decide out of sample which windows actually help. The set is configurable and can be extended toward 100D. The 1-day window uses the `abs(return) * sqrt(252)` proxy because a one-observation sample standard deviation is undefined. Both blend optimizers minimize error in annualized **variance** (options are more directly linked to variance than to volatility) and are deterministic functions of the training slice, so the walk-forward leakage guarantee holds. The diagnostics report prints each latest blend as a readable formula, for example `sqrt(0.57*vol_60² + 0.26*vol_3² + 0.10*vol_20² + 0.08*vol_7²)`.
+
+### Greeks
+
+`black_scholes_greeks` returns delta, gamma, theta (per calendar day), vega (per one volatility point), and rho (per one rate point). Gamma and vega are identical for a call and a put; delta, theta, and rho depend on the option type. All five greeks are written to `option_rankings.csv`.
 
 The `h=1` sample standard deviation is undefined. The implementation uses the standard one-day realized-volatility proxy `abs(next_return) * sqrt(252)` for that target. Horizons above one use sample standard deviation (`ddof=1`) over exactly the next `h` returns.
 
@@ -75,7 +84,7 @@ Use `--training-window 0` for expanding rather than rolling training. The comman
 - `evaluation.csv`: MAE, RMSE, variance MSE, and directional accuracy when timestamp-aligned market IV history is supplied
 - `option_rankings.csv`: required contract DataFrame plus executable-edge and liquidity fields
 - `ewma_lambda_performance.csv`, `blend_weights_history.csv`, and `model_selection_history.csv`
-- `model_diagnostics.csv`: optimized blend, EWMA, realized-20, and realized-60 variance errors by ticker, horizon, and available moneyness bucket
+- `model_diagnostics.csv`: optimized blend, sparse blend, EWMA, realized-20, and realized-60 variance errors by ticker, horizon, and available moneyness bucket, with exactly one winner marked per group
 - `latest_forecasts.json`: compact `volatility_forecast.v1` bridge for the Chrome extension
 - `variance_diagnostics_report.html`: standalone diagnostics and current research queue
 - six SVG charts and a local `visualizations/index.html` dashboard
