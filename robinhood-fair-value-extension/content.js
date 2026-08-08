@@ -91,13 +91,26 @@
     const nD1 = normalCdf(d1);
     const nD2 = normalCdf(d2);
 
+    // Theta is per calendar day (÷365, matching calendar-time pricing); rho is
+    // per one percentage-point move in the rate (÷100). Gamma and vega are the
+    // same for a call and a put; delta/theta/rho are per option type.
+    const thetaCommon = -(S * discountQ * pdfD1 * sigma) / (2 * sqrtT);
+    const callTheta =
+      (thetaCommon - r * K * discountR * nD2 + q * S * discountQ * nD1) / 365;
+    const putTheta =
+      (thetaCommon + r * K * discountR * normalCdf(-d2) - q * S * discountQ * normalCdf(-d1)) / 365;
+
     return {
       call: Math.max(S * discountQ * nD1 - K * discountR * nD2, 0),
       put: Math.max(K * discountR * normalCdf(-d2) - S * discountQ * normalCdf(-d1), 0),
       callDelta: discountQ * nD1,
-      putDelta: discountQ * (nD1 - 1),
+      putDelta: -discountQ * normalCdf(-d1),
       gamma: (discountQ * pdfD1) / (S * sigma * sqrtT),
       vega: (S * discountQ * pdfD1 * sqrtT) / 100,
+      callTheta,
+      putTheta,
+      callRho: (K * T * discountR * nD2) / 100,
+      putRho: -(K * T * discountR * normalCdf(-d2)) / 100,
     };
   }
 
@@ -1614,7 +1627,14 @@
       const historyCopy = surfaceBenchmark && Number.isFinite(variance.ivPercentile)
         ? `historical ${surfaceBenchmark.optionType} ${surfaceBenchmark.moneynessBucket}/${surfaceBenchmark.dteBucket}D IV percentile about ${variance.ivPercentile.toFixed(1)} from ${surfaceBenchmark.observations} observations`
         : "no matched historical IV bucket; research flag suppressed";
-      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus ${referenceCopy}. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; forecast IV ${fairIv.toFixed(2)}%; IV edge ${Number.isFinite(ivEdge) ? `${ivEdge >= 0 ? "+" : ""}${ivEdge.toFixed(2)} volatility points` : "unavailable"}; ${varianceCopy}; ${gammaCopy}; vega-normalized price edge ${Number.isFinite(variance.vegaNormalizedEdge) ? `${variance.vegaNormalizedEdge >= 0 ? "+" : ""}${variance.vegaNormalizedEdge.toFixed(2)} vol points` : "unavailable"}; signal ${variance.candidateSide}; ${historyCopy}; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend/carry input ${effectiveDividend.toFixed(2)}%.${alertCopy}`;
+      // Full greek set at market IV (delta/theta/rho are per option type; gamma
+      // and vega are shared). Theta is per calendar day; vega per vol point;
+      // rho per rate point. Matches the research engine's option_rankings.csv.
+      const isPutContract = String(context.optionType).toLowerCase() === "put";
+      const greeksCopy = marketGreeks
+        ? `greeks at market IV: delta ${(isPutContract ? marketGreeks.putDelta : marketGreeks.callDelta).toFixed(3)}, gamma ${marketGreeks.gamma.toFixed(4)}, theta ${formatMoney(isPutContract ? marketGreeks.putTheta : marketGreeks.callTheta)}/day, vega ${formatMoney(marketGreeks.vega)}/pt, rho ${formatMoney(isPutContract ? marketGreeks.putRho : marketGreeks.callRho)}/pt`
+        : "greeks unavailable without market IV";
+      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus ${referenceCopy}. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; forecast IV ${fairIv.toFixed(2)}%; IV edge ${Number.isFinite(ivEdge) ? `${ivEdge >= 0 ? "+" : ""}${ivEdge.toFixed(2)} volatility points` : "unavailable"}; ${varianceCopy}; ${gammaCopy}; vega-normalized price edge ${Number.isFinite(variance.vegaNormalizedEdge) ? `${variance.vegaNormalizedEdge >= 0 ? "+" : ""}${variance.vegaNormalizedEdge.toFixed(2)} vol points` : "unavailable"}; ${greeksCopy}; signal ${variance.candidateSide}; ${historyCopy}; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend/carry input ${effectiveDividend.toFixed(2)}%.${alertCopy}`;
     }
   }
 

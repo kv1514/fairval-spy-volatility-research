@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Robinhood Fair Value Overlay (Claude Build)",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Overlays walk-forward variance forecasts, Haugh gamma-weighted edges, and skew-aware option research diagnostics.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://home.treasury.gov/*"],

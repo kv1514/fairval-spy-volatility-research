@@ -32,6 +32,28 @@ test("matches the standard Black-Scholes reference result", () => {
   assert.ok(Math.abs(result.put - 5.5735) < 0.001);
 });
 
+test("computes the full greek set with correct signs and parity", () => {
+  const g = core.calculateBlackScholes({
+    spot: 100,
+    strike: 100,
+    days: 30,
+    volatility: 22,
+    rate: 4,
+    dividend: 1.5,
+  });
+  // Gamma and vega are shared between call and put; delta/theta/rho are signed.
+  assert.ok(g.gamma > 0 && g.vega > 0);
+  assert.ok(g.callDelta > 0 && g.putDelta < 0);
+  assert.ok(g.callRho > 0 && g.putRho < 0);
+  assert.ok(g.callTheta < 0); // near-ATM long call bleeds time value
+  // Put-call parity: C - P = S e^{-qT} - K e^{-rT}.
+  const T = 30 / 365;
+  const parity = 100 * Math.exp((-1.5 / 100) * T) - 100 * Math.exp((-4 / 100) * T);
+  assert.ok(Math.abs(g.call - g.put - parity) < 1e-6);
+  // Delta relationship: callDelta - putDelta = e^{-qT}.
+  assert.ok(Math.abs(g.callDelta - g.putDelta - Math.exp((-1.5 / 100) * T)) < 1e-9);
+});
+
 test("selects the nearest leakage-safe walk-forward horizon", () => {
   const payload = {
     schema: "volatility_forecast.v1",
