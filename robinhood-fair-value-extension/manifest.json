@@ -1,18 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "Robinhood Fair Value Overlay (Claude Build)",
-  "version": "1.5.2",
-  "description": "Overlays walk-forward variance forecasts, Haugh gamma-weighted edges, and skew-aware option research diagnostics.",
+  "name": "FairVal Multi-Model Option Research",
+  "version": "2.0.0",
+  "description": "Compares forecast-volatility values under European Black-Scholes and American tree models with explicit diagnostics.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://home.treasury.gov/*"],
   "action": {
-    "default_title": "Fair Value Overlay (Claude Build)",
+    "default_title": "FairVal Multi-Model Research",
     "default_popup": "popup.html"
   },
   "content_scripts": [
     {
       "matches": ["https://robinhood.com/*"],
-      "js": ["content.js"],
+      "js": ["pricing-core.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
     }

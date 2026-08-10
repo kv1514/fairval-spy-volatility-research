@@ -4,11 +4,14 @@ As of August 5, 2026.
 
 ## Methodology
 
+- [Cox, Ross, and Rubinstein, “Option Pricing: A Simplified Approach” (1979)](https://doi.org/10.1016/0304-405X(79)90015-1): the primary CRR discrete-time, no-arbitrage foundation for the binomial implementation.
+- [Barone-Adesi and Whaley, “Efficient Analytic Approximation of American Option Values” (1987)](https://doi.org/10.1111/j.1540-6261.1987.tb02569.x): the primary source for the fast quadratic American approximation used as a scanner benchmark.
+- [OCC Characteristics and Risks of Standardized Options](https://www.theocc.com/company-information/documents-and-archives/options-disclosure-document): primary contract-risk and exercise-style definitions. OCC notes that index options may be American- or European-style, which is why FairVal keeps style mapping configurable and warns when it is inferred.
 - [Cboe American- and European-Style Theoretical Options Calculation Methodology](https://cdn.cboe.com/api/global/us_indices/governance/Cboe_American_and_European-Style_Theoretical_Options_Calculation_Methodology.pdf): Cboe describes a strike/maturity volatility surface, U.S. Constant Maturity Treasury rates interpolated to each expiration, discrete dividend forecasts for American-style ETF options, and Black–Scholes for European-style index options.
 - [Cboe LiveVol methodology FAQ](https://datashop.cboe.com/faqs): Cboe states that option mid-price is normally used for implied volatility and that NBBO inputs are used. This supports using Robinhood's displayed Mark/IV pair instead of treating Ask IV as equivalent.
 - [SEC Investor.gov bid/ask definition](https://www.investor.gov/introduction-investing/investing-basics/glossary/ask-price): the bid/ask difference is the spread. The research-flag filter requires modeled edge beyond an executable-side quote and rejects spreads above the user-set threshold.
 - [SEC Investor Bulletin: An Introduction to Options](https://www.investor.gov/introduction-investing/general-resources/news-alerts/alerts-bulletins/investor-bulletins-63): options involve material risks and trade across multiple marketplaces. Extension flags are deliberately presented as research candidates, not final recommendations.
-- The extension follows the same input hierarchy at a screen-grade level. It cannot reproduce Cboe analytics without OPRA NBBO data, a professional forward-dividend database, and a full American exercise model.
+- The extension follows the same input hierarchy at a screen-grade level. It now includes American CRR, trinomial, and Barone-Adesi/Whaley calculations, but it still cannot reproduce professional analytics without OPRA NBBO data, contract-reference style fields, and a forward discrete-dividend database.
 
 ## Risk-free rates
 

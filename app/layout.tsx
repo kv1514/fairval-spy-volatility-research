@@ -11,8 +11,8 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "blackscholes-fair-value-lab.kveldanda10.chatgpt.site";
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.includes("localhost") ? "http" : "https");
   const origin = `${protocol}://${host}`;
-  const title = "BlackScholes Lab - Live Options Fair Value";
-  const description = "Load SPY, SPX, and QQQ option chains, compare market quotes with Black-Scholes fair value, and inspect model Greeks.";
+  const title = "FairVal Lab - Multi-Model Option Research";
+  const description = "Compare live option quotes with forecast-volatility values under European Black-Scholes and American CRR/trinomial models.";
 
   return {
     title,
@@ -22,7 +22,7 @@ export async function generateMetadata(): Promise<Metadata> {
       description,
       type: "website",
       url: origin,
-      images: [{ url: `${origin}/og.png`, width: 1745, height: 909, alt: "BlackScholes Lab live options pricing workbench" }],
+      images: [{ url: `${origin}/og.png`, width: 1745, height: 909, alt: "FairVal multi-model options research workbench" }],
     },
     twitter: {
       card: "summary_large_image",

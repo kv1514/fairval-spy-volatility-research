@@ -1,6 +1,8 @@
 (function fairValueExtension() {
   "use strict";
 
+  const Pricing = globalThis.FairValPricing || null;
+
   const DIVIDEND_DEFAULTS = { SPY: 1.11, SPX: 1.12, QQQ: 0.44 };
   const FALLBACK_TREASURY_CURVE = {
     date: "2026-08-04",
@@ -17,7 +19,7 @@
   };
   const IV_SOURCES = ["walkforward", "surface", "forecast", "individual", "manual"];
   const DEFAULT_SETTINGS = {
-    settingsVersion: 6,
+    settingsVersion: 7,
     enabled: true,
     ivSource: "surface",
     volatility: 20,
@@ -32,6 +34,7 @@
     autoScan: true,
     autoScanIntervalSeconds: 30,
     paperRecording: true,
+    treeSteps: 75,
     collapsed: false,
   };
   const PAPER_STUDY_VERSION = 3;
@@ -908,6 +911,7 @@
   let paperStudy = { version: PAPER_STUDY_VERSION, records: [], updatedAt: null, outcomes15m: null, outcomes60m: null };
   let paperWriteRunning = false;
   let pendingPaperRecords = [];
+  const pricingCache = new Map();
   const recordedCaptureTimes = new Map();
 
   async function refreshTreasuryCurve() {
@@ -1370,6 +1374,14 @@
         moneynessBucket: contract.surfaceBenchmark?.moneynessBucket ?? null,
         dteBucket: contract.surfaceBenchmark?.dteBucket ?? null,
         fairValue: contract.fairValue,
+        modelUsed: contract.pricing?.modelUsed ?? "black_scholes_dividend_adjusted",
+        modelReason: contract.pricing?.modelReason ?? "American-model diagnostics unavailable",
+        bsForecastFairValue: contract.pricing?.bsForecastFairValue ?? contract.fairValue,
+        americanForecastFairValue: contract.pricing?.americanForecastFairValue ?? null,
+        earlyExercisePremium: contract.pricing?.earlyExercisePremium ?? 0,
+        blackScholesIv: contract.pricing?.blackScholesIv ?? null,
+        americanIv: contract.pricing?.americanIv ?? null,
+        pricingWarning: contract.pricing?.pricingWarning ?? null,
         flagDirection: contract.alert.flagged ? contract.alert.direction : null,
         edgePercent: contract.alert.flagged ? contract.alert.edgePercent : null,
         modelMode: settings.ivSource,
@@ -1494,7 +1506,7 @@
         return null;
       }
       const fairIv = Math.min(Math.max(baseIv + Number(settings.ivShift), 0.01), 500);
-      const fairValue = optionPrice({
+      const pricingInput = {
         optionType: context.optionType,
         spot: context.spot,
         strike,
@@ -1502,7 +1514,32 @@
         volatility: fairIv,
         rate: effectiveRate,
         dividend: effectiveDividend,
-      });
+      };
+      const pricingCacheKey = [
+        context.ticker, context.optionType, context.expiration, context.spot.toFixed(4), strike,
+        days.toFixed(6), fairIv.toFixed(4), Number(marketIv).toFixed(4), referencePrice.toFixed(4),
+        effectiveRate.toFixed(4), effectiveDividend.toFixed(4), Number(settings.treeSteps || 75),
+        exactQuote ? "iv" : "noiv",
+      ].join("|");
+      let pricing = pricingCache.get(pricingCacheKey);
+      if (!pricing && Pricing) {
+        try {
+          pricing = Pricing.compareModels({
+            ...pricingInput,
+            ticker: context.ticker,
+            marketMid: referencePrice,
+            marketIv: Number.isFinite(marketIv) ? marketIv : fairIv,
+            forecastVolatility: fairIv,
+            treeSteps: Math.min(Math.max(Number(settings.treeSteps) || 75, 25), 500),
+            calculateIv: Boolean(exactQuote && Number.isFinite(marketIv)),
+          });
+          pricingCache.set(pricingCacheKey, pricing);
+          if (pricingCache.size > 2_000) pricingCache.delete(pricingCache.keys().next().value);
+        } catch {
+          pricing = null;
+        }
+      }
+      const fairValue = pricing?.selectedFairValue ?? optionPrice(pricingInput);
       const difference = fairValue - referencePrice;
       const marketGreeks = Number.isFinite(marketIv)
         ? calculateBlackScholes({
@@ -1545,7 +1582,7 @@
         ? rawAlert
         : { flagged: false };
       const ivEdge = Number.isFinite(marketIv) ? fairIv - marketIv : null;
-      return { ...contract, fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark };
+      return { ...contract, fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark, pricing };
     }).filter(Boolean);
     const alerts = pricedContracts
       .filter((contract) => contract.alert.flagged)
@@ -1579,13 +1616,13 @@
     for (const contract of pricedContracts) {
       const {
         row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv,
-        fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark,
+        fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark, pricing,
       } = contract;
       let badge = priceCell.querySelector("[data-bsfv-overlay]");
       if (!badge) {
         badge = document.createElement("span");
         badge.setAttribute("data-bsfv-overlay", "true");
-        badge.setAttribute("aria-label", "Black-Scholes fair value");
+        badge.setAttribute("aria-label", "Multi-model option research value");
         priceCell.setAttribute("data-bsfv-cell", "true");
         priceCell.appendChild(badge);
       }
@@ -1606,7 +1643,10 @@
       const percentileCopy = Number.isFinite(variance.ivPercentile)
         ? ` · IVP ${variance.ivPercentile.toFixed(0)}`
         : "";
-      const nextText = `FV ${formatMoney(fairValue)} · ${marketIvCopy}${ivEdgeCopy}${varianceEdgeCopy}${percentileCopy}${flagCopy}`;
+      const modelLabel = pricing?.modelUsed === "binomial_american_crr"
+        ? "CRR"
+        : pricing?.style === "european" ? "BS-EU" : "BS-q";
+      const nextText = `FV ${formatMoney(fairValue)} · ${modelLabel} · ${marketIvCopy}${ivEdgeCopy}${varianceEdgeCopy}${percentileCopy}${flagCopy}`;
       if (badge.textContent !== nextText) badge.textContent = nextText;
       const comparison = difference >= 0 ? `+${formatMoney(difference)}` : `-${formatMoney(Math.abs(difference))}`;
       badge.dataset.signal = Math.abs(difference) < 0.005 ? "flat" : difference > 0 ? "above" : "below";
@@ -1634,7 +1674,10 @@
       const greeksCopy = marketGreeks
         ? `greeks at market IV: delta ${(isPutContract ? marketGreeks.putDelta : marketGreeks.callDelta).toFixed(3)}, gamma ${marketGreeks.gamma.toFixed(4)}, theta ${formatMoney(isPutContract ? marketGreeks.putTheta : marketGreeks.callTheta)}/day, vega ${formatMoney(marketGreeks.vega)}/pt, rho ${formatMoney(isPutContract ? marketGreeks.putRho : marketGreeks.callRho)}/pt`
         : "greeks unavailable without market IV";
-      badge.title = `${formatMoney(fairValue)} relative model value; ${comparison} versus ${referenceCopy}. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; forecast IV ${fairIv.toFixed(2)}%; IV edge ${Number.isFinite(ivEdge) ? `${ivEdge >= 0 ? "+" : ""}${ivEdge.toFixed(2)} volatility points` : "unavailable"}; ${varianceCopy}; ${gammaCopy}; vega-normalized price edge ${Number.isFinite(variance.vegaNormalizedEdge) ? `${variance.vegaNormalizedEdge >= 0 ? "+" : ""}${variance.vegaNormalizedEdge.toFixed(2)} vol points` : "unavailable"}; ${greeksCopy}; signal ${variance.candidateSide}; ${historyCopy}; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend/carry input ${effectiveDividend.toFixed(2)}%.${alertCopy}`;
+      const modelComparisonCopy = pricing
+        ? `selected model ${pricing.modelUsed}: ${pricing.modelReason}; BS forecast-vol value ${formatMoney(pricing.bsForecastFairValue)}; American CRR forecast-vol value ${Number.isFinite(pricing.americanForecastFairValue) ? formatMoney(pricing.americanForecastFairValue) : "n/a"}; trinomial ${Number.isFinite(pricing.trinomialForecastFairValue) ? formatMoney(pricing.trinomialForecastFairValue) : "n/a"}; BAW approximation ${Number.isFinite(pricing.approximationForecastFairValue) ? formatMoney(pricing.approximationForecastFairValue) : "n/a"}; American-vs-BS difference ${formatMoney(pricing.earlyExercisePremium)}; same-tree exercise premium ${formatMoney(pricing.sameTreeExercisePremium)}; BS midpoint IV ${Number.isFinite(pricing.blackScholesIv) ? `${pricing.blackScholesIv.toFixed(2)}%` : "n/a"}; American midpoint IV ${Number.isFinite(pricing.americanIv) ? `${pricing.americanIv.toFixed(2)}%` : "n/a"}${pricing.pricingWarning ? `; warning: ${pricing.pricingWarning}` : ""}`
+        : "American-model core unavailable; dividend-adjusted Black-Scholes fallback";
+      badge.title = `${formatMoney(fairValue)} selected research value; ${comparison} versus ${referenceCopy}. ${modelComparisonCopy}. Market-IV model value is diagnostic/circular; the research edge uses forecast IV ${fairIv.toFixed(2)}%. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; IV edge ${Number.isFinite(ivEdge) ? `${ivEdge >= 0 ? "+" : ""}${ivEdge.toFixed(2)} volatility points` : "unavailable"}; ${varianceCopy}; ${gammaCopy}; vega-normalized price edge ${Number.isFinite(variance.vegaNormalizedEdge) ? `${variance.vegaNormalizedEdge >= 0 ? "+" : ""}${variance.vegaNormalizedEdge.toFixed(2)} vol points` : "unavailable"}; ${greeksCopy}; signal ${variance.candidateSide}; ${historyCopy}; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend/carry input ${effectiveDividend.toFixed(2)}%.${alertCopy}`;
     }
   }
 
@@ -1689,6 +1732,7 @@
         autoScan: settings.autoScan,
         autoScanIntervalSeconds: settings.autoScanIntervalSeconds,
         paperRecording: settings.paperRecording,
+        treeSteps: settings.treeSteps,
       });
       ensurePanel();
       syncPanel();

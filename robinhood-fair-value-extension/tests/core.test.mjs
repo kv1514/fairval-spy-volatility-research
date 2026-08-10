@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = await readFile(new URL("../content.js", import.meta.url), "utf8");
+const pricingSource = await readFile(new URL("../pricing-core.js", import.meta.url), "utf8");
 const context = vm.createContext({
   Date,
   Intl,
@@ -16,8 +17,52 @@ const context = vm.createContext({
   setTimeout,
 });
 context.globalThis = context;
+vm.runInContext(pricingSource, context);
 vm.runInContext(source, context);
 const core = context.__BSFV_CORE__;
+const pricing = context.FairValPricing;
+
+test("multi-model core prices European benchmarks and American exercise", () => {
+  const input = { spot: 100, strike: 100, days: 365, volatility: 20, rate: 5, dividend: 0, optionType: "call", exerciseStyle: "european" };
+  const bs = pricing.blackScholes(input).price;
+  const binomial = pricing.crr(input, { steps: 1000, american: false }).price;
+  const trinomial = pricing.trinomial(input, { steps: 1000, american: false }).price;
+  assert.ok(Math.abs(bs - 10.45058357) < 1e-6);
+  assert.ok(Math.abs(binomial - bs) < 0.003);
+  assert.ok(Math.abs(trinomial - bs) < 0.002);
+  const put = { ...input, spot: 80, strike: 100, rate: 8, optionType: "put", exerciseStyle: "american" };
+  assert.ok(pricing.crr(put, { steps: 500, american: true }).price > pricing.blackScholes(put).price);
+});
+
+test("generic JavaScript IV solver supports Black-Scholes and CRR", () => {
+  const input = { spot: 100, strike: 105, days: 45, volatility: 27, rate: 4, dividend: 1, optionType: "put", exerciseStyle: "american" };
+  const crrModel = pricing.crrModel(100, true);
+  const result = pricing.impliedVolatility(crrModel.price(input), crrModel, { ...input, volatility: 15 });
+  assert.equal(result.converged, true);
+  assert.ok(Math.abs(result.volatility - 27) < 1e-5);
+  const impossible = pricing.impliedVolatility(4, crrModel, { ...input, spot: 100, strike: 110 });
+  assert.equal(impossible.status, "below_lower_bound");
+});
+
+test("model comparison resolves style and reports selection rationale", () => {
+  const spx = pricing.compareModels({ ticker: "SPX", spot: 6000, strike: 6000, days: 10, volatility: 20, marketIv: 20, forecastVolatility: 22, marketMid: 50, rate: 4, dividend: 1, optionType: "call" });
+  assert.equal(spx.style, "european");
+  assert.equal(spx.modelUsed, "black_scholes_dividend_adjusted");
+  const put = pricing.compareModels({ ticker: "AAPL", spot: 80, strike: 100, days: 90, volatility: 25, marketIv: 25, forecastVolatility: 30, marketMid: 20.5, rate: 5, dividend: 0, optionType: "put", treeSteps: 100 });
+  assert.equal(put.style, "american");
+  assert.ok(put.pricingWarning.includes("inferred"));
+  assert.ok(Number.isFinite(put.americanForecastFairValue));
+  assert.ok(put.earlyExercisePremium >= 0);
+});
+
+test("model selection uses same-tree exercise premium, not lattice error", () => {
+  const noDividendCall = pricing.compareModels({ ticker: "SPY", spot: 100, strike: 100, days: 30, volatility: 20, marketIv: 20, forecastVolatility: 20, marketMid: 2.5, rate: 5, dividend: 0, optionType: "call", treeSteps: 75 });
+  assert.equal(noDividendCall.sameTreeExercisePremium, 0);
+  assert.equal(noDividendCall.modelUsed, "black_scholes_dividend_adjusted");
+  const deepPut = pricing.compareModels({ ticker: "AAPL", spot: 80, strike: 100, days: 365, volatility: 20, marketIv: 20, forecastVolatility: 20, marketMid: 20.5, rate: 8, dividend: 0, optionType: "put", treeSteps: 150 });
+  assert.ok(deepPut.sameTreeExercisePremium > 0.01);
+  assert.equal(deepPut.modelUsed, "binomial_american_crr");
+});
 
 test("matches the standard Black-Scholes reference result", () => {
   const result = core.calculateBlackScholes({

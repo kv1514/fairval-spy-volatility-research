@@ -1,5 +1,5 @@
 const DEFAULTS = {
-  settingsVersion: 6,
+  settingsVersion: 7,
   enabled: true,
   ivSource: "surface",
   volatility: 20,
@@ -14,6 +14,7 @@ const DEFAULTS = {
   autoScan: true,
   autoScanIntervalSeconds: 30,
   paperRecording: true,
+  treeSteps: 75,
 };
 const IV_SOURCES = ["walkforward", "surface", "forecast", "individual", "manual"];
 
@@ -32,6 +33,7 @@ const fields = {
   autoScan: document.getElementById("autoScan"),
   autoScanIntervalSeconds: document.getElementById("autoScanIntervalSeconds"),
   paperRecording: document.getElementById("paperRecording"),
+  treeSteps: document.getElementById("treeSteps"),
 };
 
 function syncDisabledState() {
@@ -72,6 +74,7 @@ chrome.storage.sync.get(null, (saved) => {
     autoScan: settings.autoScan,
     autoScanIntervalSeconds: settings.autoScanIntervalSeconds,
     paperRecording: settings.paperRecording,
+    treeSteps: settings.treeSteps,
   });
   fields.enabled.checked = settings.enabled;
   fields.ivSource.value = IV_SOURCES.includes(settings.ivSource)
@@ -89,6 +92,7 @@ chrome.storage.sync.get(null, (saved) => {
   fields.autoScan.checked = settings.autoScan;
   fields.autoScanIntervalSeconds.value = settings.autoScanIntervalSeconds;
   fields.paperRecording.checked = settings.paperRecording;
+  fields.treeSteps.value = settings.treeSteps;
   syncDisabledState();
 });
 
@@ -154,6 +158,7 @@ document.getElementById("apply").addEventListener("click", () => {
     autoScan: fields.autoScan.checked,
     autoScanIntervalSeconds: Math.min(Math.max(Number(fields.autoScanIntervalSeconds.value) || 30, 15), 300),
     paperRecording: fields.paperRecording.checked,
+    treeSteps: Math.min(Math.max(Number(fields.treeSteps.value) || 75, 25), 500),
   };
   chrome.storage.sync.set(settings, async () => {
     const message = document.getElementById("message");

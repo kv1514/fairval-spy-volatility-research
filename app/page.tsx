@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   calculateBlackScholes,
+  calculateCrr,
+  comparePricingModels,
   daysToExpiration,
   valueForType,
   type ModelInputs,
@@ -222,8 +224,20 @@ export default function Home() {
 
   const result = useMemo(() => calculateBlackScholes(inputs), [inputs]);
   const modelAvailable = Boolean(selected && (ivMode === "manual" || selected.iv != null));
-  const fairValue = modelAvailable ? valueForType(result, optionType) : null;
   const marketMid = selected ? midpoint(selected) : 0;
+  const pricingComparison = useMemo(() => {
+    if (!modelAvailable || !selected) return null;
+    return comparePricingModels({
+      symbol,
+      inputs,
+      optionType,
+      marketMid,
+      marketIv: selected.iv ?? inputs.volatility,
+      forecastVolatility: inputs.volatility,
+      treeSteps: 75,
+    });
+  }, [inputs, marketMid, modelAvailable, optionType, selected, symbol]);
+  const fairValue = pricingComparison?.selectedFairValue ?? null;
   const difference = fairValue == null ? 0 : fairValue - marketMid;
   const differencePercent = marketMid > 0 ? (difference / marketMid) * 100 : 0;
   const spread = selected ? Math.max(selected.ask - selected.bid, 0) : 0;
@@ -291,9 +305,9 @@ export default function Home() {
   return (
     <main id="top">
       <header className="site-header">
-        <a className="brand" href="#top" aria-label="BlackScholes Lab home">
+        <a className="brand" href="#top" aria-label="FairVal Lab home">
           <span className="brand-mark" aria-hidden="true">ƒ</span>
-          <span>BlackScholes <span className="brand-muted">Lab</span></span>
+          <span>FairVal <span className="brand-muted">Lab</span></span>
         </a>
         <div className="header-actions">
           <div className={`feed-status ${market?.status === "live" ? "is-live" : market?.status === "indicative" ? "is-indicative" : ""}`}>
@@ -311,7 +325,7 @@ export default function Home() {
           <p className="eyebrow">LIVE OPTIONS WORKBENCH</p>
           <h1>Market price,<br /><span>meet model value.</span></h1>
           <p className="hero-copy">
-            Select a live contract, load its market assumptions, and compare the quoted price with a Black–Scholes theoretical value.
+            Compare a live quote with a forecast-volatility value under European Black–Scholes and American exercise-aware trees.
           </p>
         </div>
         <div className="symbol-picker" aria-label="Choose an underlying">
@@ -417,7 +431,8 @@ export default function Home() {
                 {contracts.map((contract) => {
                   const rowFair = contract.iv == null
                     ? null
-                    : valueForType(calculateBlackScholes({
+                    : symbol === "SPX"
+                      ? valueForType(calculateBlackScholes({
                         spot: market?.spot ?? inputs.spot,
                         strike: contract.strike,
                         days: market
@@ -426,7 +441,19 @@ export default function Home() {
                         volatility: contract.iv,
                         rate: inputs.rate,
                         dividend: inputs.dividend,
-                      }), optionType);
+                      }), optionType)
+                      : calculateCrr({
+                        spot: market?.spot ?? inputs.spot,
+                        strike: contract.strike,
+                        days: market
+                          ? daysToExpiration(market.expiration, Date.now(), contract.settlementMinutes)
+                          : inputs.days,
+                        volatility: contract.iv,
+                        rate: inputs.rate,
+                        dividend: inputs.dividend,
+                        optionType,
+                        exerciseStyle: "american",
+                      }, 50, true).price;
                   const isSelected = contract.symbol === selected?.symbol;
                   return (
                     <tr
@@ -473,10 +500,21 @@ export default function Home() {
           </div>
 
           <div className="fair-value-block">
-            <span>BLACK–SCHOLES FAIR VALUE</span>
+            <span>SELECTED FORECAST-VOL MODEL VALUE</span>
             <strong>{fairValue == null ? "—" : money.format(fairValue)}</strong>
             <small>{fairValue == null ? (selected ? "Market IV unavailable—use Manual IV" : "Select a live contract") : `${money.format(fairValue * 100)} per 100-share contract`}</small>
           </div>
+
+          {pricingComparison && (
+            <div className="pricing-diagnostics">
+              <div><span>MODEL USED</span><strong>{pricingComparison.modelUsed}</strong></div>
+              <div><span>BS / FORECAST VOL</span><strong>{money.format(pricingComparison.bsForecastFairValue)}</strong></div>
+              <div><span>AMERICAN CRR / FORECAST VOL</span><strong>{pricingComparison.americanForecastFairValue == null ? "N/A" : money.format(pricingComparison.americanForecastFairValue)}</strong></div>
+              <div><span>EARLY-EXERCISE PREMIUM</span><strong>{money.format(pricingComparison.earlyExercisePremium)}</strong></div>
+              <p><strong>{pricingComparison.modelReason}</strong> {pricingComparison.pricingWarning}</p>
+              {ivMode === "market" && <p className="circular-note">Market-IV value is a diagnostic and will usually reproduce the market. Switch to Manual only when the input is your independent volatility forecast.</p>}
+            </div>
+          )}
 
           {selected && fairValue != null && (
             <div className="comparison-block">
@@ -541,14 +579,14 @@ export default function Home() {
         <div className="method-grid">
           <div><span>01</span><strong>Same contract</strong><p>Match symbol, call or put, expiration, strike, and quote timestamp before comparing with Robinhood.</p></div>
           <div><span>02</span><strong>Same feed quality</strong><p>OPRA is the consolidated options market. Alpaca Basic indicative prices are modified and can differ.</p></div>
-          <div><span>03</span><strong>Model—not market mark</strong><p>Black–Scholes is theoretical. Robinhood’s mark, execution price, and American exercise effects can differ.</p></div>
+          <div><span>03</span><strong>Model—not market mark</strong><p>Forecast volatility drives the research value. Market-IV value is circular; American trees add an early-exercise diagnostic.</p></div>
         </div>
       </section>
 
       <footer>
         <div>
-          <strong>BlackScholes Lab</strong>
-          <p>European-style Black–Scholes with continuous dividends. SPY and QQQ are American-style contracts, so model values are approximations.</p>
+          <strong>FairVal Multi-Model Lab</strong>
+          <p>European Black–Scholes baseline, American CRR/trinomial comparison, continuous-dividend approximation, and no order execution.</p>
         </div>
         <p className="disclaimer">EDUCATIONAL ANALYTICS · NOT INVESTMENT ADVICE</p>
       </footer>

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from html import escape
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from .engine import format_blend_formula
+from .pricing_models import CRRBinomialModel, PricingInputs, TrinomialModel, convergence_report
 
 
 MODEL_COLORS = {
@@ -222,5 +224,141 @@ th:first-child,td:first-child{{text-align:left}}.model-pill{{display:inline-bloc
 <section><h2>Current research queue</h2><p class="muted">Candidates are prioritized for further review, not recommended trades.</p>{candidates_table}</section>
 <section class="sources"><h2>Sources and limitations</h2><p><strong>Model source:</strong> {escape(source_pdf)}. <strong>Market data:</strong> included Robinhood daily bars, live option quote snapshot, and historical hourly last-trade replay. The replay lacks historical NBBO, so inverted historical IV percentiles are screen-grade rather than execution-grade.</p></section>
 </main></body></html>'''
+    target.write_text(html, encoding="utf-8")
+    return target
+
+
+def write_pricing_diagnostics_report(
+    output_path: str | Path,
+    rankings: pd.DataFrame,
+    max_contracts: int = 20,
+) -> Path:
+    """Write an interactive, standalone model-comparison diagnostics page."""
+
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    frame = rankings.copy()
+    if not frame.empty:
+        sort_columns = [column for column in ("date", "composite_score") if column in frame]
+        ascending = [False] * len(sort_columns)
+        if sort_columns:
+            frame = frame.sort_values(sort_columns, ascending=ascending)
+        frame = frame.head(max_contracts)
+
+    def safe(value: object) -> object:
+        if value is None or (not isinstance(value, (dict, list)) and pd.isna(value)):
+            return None
+        if isinstance(value, (np.integer,)):
+            return int(value)
+        if isinstance(value, (np.floating,)):
+            return float(value)
+        if isinstance(value, pd.Timestamp):
+            return value.isoformat()
+        return value
+
+    contracts: list[dict[str, object]] = []
+    for index, row in enumerate(frame.itertuples(index=False)):
+        option_type = str(getattr(row, "option_type", "call")).lower()
+        style = str(getattr(row, "option_style", "unknown")).lower()
+        inputs = PricingInputs(
+            spot=float(row.spot), strike=float(row.strike), dte=float(row.dte),
+            volatility=float(row.forecast_volatility), rate=float(row.rate), dividend=float(row.dividend),
+            option_type=option_type, exercise_style="american" if style == "american" else "european",
+        )
+        binomial_convergence = convergence_report(CRRBinomialModel, inputs) if style == "american" else []
+        trinomial_convergence = convergence_report(TrinomialModel, inputs) if style == "american" else []
+        record = {
+            "id": index,
+            "label": f"{row.ticker} {option_type.upper()} {float(row.strike):g} · {int(row.dte)} DTE",
+            "ticker": str(row.ticker),
+            "date": safe(getattr(row, "date", None)),
+            "expiration": safe(row.expiration),
+            "optionType": option_type,
+            "strike": safe(row.strike),
+            "dte": safe(row.dte),
+            "spot": safe(row.spot),
+            "bid": safe(row.bid),
+            "ask": safe(row.ask),
+            "mid": safe(row.market_mid),
+            "spreadPct": safe(row.spread_pct),
+            "marketIv": safe(row.market_iv),
+            "forecastVolatility": safe(row.forecast_volatility),
+            "blackScholesIv": safe(row.black_scholes_iv),
+            "americanIv": safe(row.american_model_iv),
+            "bsMarket": safe(row.bs_market_iv_fair_value),
+            "bsForecast": safe(row.bs_forecast_vol_fair_value),
+            "binomialMarket": safe(getattr(row, "binomial_market_iv_fair_value", None)),
+            "binomialForecast": safe(getattr(row, "binomial_forecast_vol_fair_value", None)),
+            "trinomialForecast": safe(getattr(row, "trinomial_forecast_vol_fair_value", None)),
+            "approximationForecast": safe(getattr(row, "approximation_forecast_vol_fair_value", None)),
+            "selectedFairValue": safe(row.selected_model_fair_value),
+            "earlyExercisePremium": safe(row.early_exercise_premium),
+            "treeExactPremium": safe(getattr(row, "tree_early_exercise_premium", None)),
+            "priceEdgeBs": safe(row.price_edge_bs),
+            "priceEdgeAmerican": safe(row.price_edge_american),
+            "edgeAfterSpreadBs": safe(row.edge_after_spread_bs),
+            "edgeAfterSpreadAmerican": safe(row.edge_after_spread_american),
+            "volEdge": safe(row.vol_edge),
+            "varianceEdge": safe(row.variance_edge),
+            "delta": safe(row.delta),
+            "gamma": safe(row.gamma),
+            "americanDelta": safe(row.american_delta),
+            "americanGamma": safe(row.american_gamma),
+            "modelUsed": str(row.model_used),
+            "modelReason": str(row.model_reason),
+            "modelConfidence": safe(row.model_confidence),
+            "blackScholesRuntimeMs": safe(getattr(row, "black_scholes_runtime_ms", None)),
+            "binomialRuntimeMs": safe(getattr(row, "binomial_runtime_ms", None)),
+            "trinomialRuntimeMs": safe(getattr(row, "trinomial_runtime_ms", None)),
+            "approximationRuntimeMs": safe(getattr(row, "approximation_runtime_ms", None)),
+            "forecastModel": str(row.forecast_model_used),
+            "pricingWarning": str(row.pricing_warning or ""),
+            "dataQualityWarning": str(row.data_quality_warning or ""),
+            "binomialConvergence": binomial_convergence,
+            "trinomialConvergence": trinomial_convergence,
+        }
+        contracts.append(record)
+
+    payload = json.dumps(contracts, ensure_ascii=False, allow_nan=False).replace("</", "<\\/")
+    html = f'''<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FairVal Multi-Model Pricing Diagnostics</title>
+<style>
+:root{{--ink:#10202b;--muted:#63727b;--paper:#f3f1ea;--card:#fff;--line:#d7dad5;--green:#087a58;--amber:#a45c11;--red:#a6362d;--blue:#315b8f}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 Inter,Segoe UI,Arial,sans-serif}}
+main{{max-width:1320px;margin:auto;padding:36px 28px 72px}}header{{display:grid;grid-template-columns:1fr minmax(280px,410px);gap:30px;align-items:end;padding-bottom:25px;border-bottom:2px solid var(--ink)}}
+.eyebrow{{font:800 10px/1.2 ui-monospace,monospace;letter-spacing:.14em;color:var(--green)}}h1{{max-width:760px;margin:10px 0 8px;font-size:clamp(36px,5vw,62px);line-height:.98;letter-spacing:-.055em}}header p{{max-width:760px;margin:0;color:var(--muted);font-size:15px}}
+label{{display:block;color:var(--muted);font:700 9px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}}select{{width:100%;height:48px;margin-top:8px;padding:0 12px;border:1px solid var(--ink);border-radius:0;background:#fff;color:var(--ink);font:700 12px ui-monospace,monospace}}
+.empty{{padding:80px 0;color:var(--muted);text-align:center}}.hero-grid{{display:grid;grid-template-columns:1.15fr .85fr;gap:18px;margin-top:24px}}
+.panel{{background:var(--card);border:1px solid var(--line);padding:22px}}.value-card{{position:relative;overflow:hidden;background:var(--ink);color:#fff}}.value-card::after{{content:"";position:absolute;right:-90px;bottom:-130px;width:300px;height:300px;border:46px solid rgba(255,255,255,.045);border-radius:50%}}
+.value-card .caption,.metric span{{display:block;color:#aebbc2;font:700 9px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}}.value-card strong{{display:block;margin:8px 0;font:500 58px ui-monospace,monospace;letter-spacing:-.08em}}.model-tag{{display:inline-block;padding:5px 8px;background:#dff5e9;color:#075a42;font:800 9px ui-monospace,monospace}}
+.reason{{position:relative;z-index:1;max-width:640px;margin-top:18px;color:#cbd4d8}}.metrics{{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--line);border:1px solid var(--line)}}.metric{{min-height:90px;padding:15px;background:#fff}}.metric span{{color:var(--muted)}}.metric strong{{display:block;margin-top:8px;font:650 17px ui-monospace,monospace}}.metric small{{display:block;margin-top:4px;color:var(--muted);font-size:10px}}
+.warning{{margin-top:16px;padding:12px 14px;border-left:3px solid var(--amber);background:#fbf0df;color:#6c522f;font-size:11px}}.warning.ok{{border-color:var(--green);background:#e8f5ee;color:#285d4c}}
+section{{margin-top:32px}}h2{{margin:0 0 7px;font-size:22px;letter-spacing:-.03em}}section>p{{margin:0 0 14px;color:var(--muted)}}.table-wrap{{overflow:auto;border:1px solid var(--line);background:#fff}}table{{width:100%;border-collapse:collapse;white-space:nowrap}}th,td{{padding:10px 12px;border-bottom:1px solid #e5e7e3;text-align:right;font:11px ui-monospace,monospace}}th{{background:#eceeea;color:#57656d;font-size:9px;letter-spacing:.06em;text-transform:uppercase}}th:first-child,td:first-child{{text-align:left}}tr.selected td{{background:#ebf5f0;font-weight:700}}
+.two-col{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}.legend{{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}}.legend span{{padding:4px 7px;border:1px solid var(--line);background:#fff;font:700 9px ui-monospace,monospace}}.foot{{margin-top:40px;padding-top:22px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}}.foot a{{color:var(--green)}}
+@media(max-width:850px){{header,.hero-grid,.two-col{{grid-template-columns:1fr}}.value-card strong{{font-size:48px}}main{{padding:24px 16px 50px}}}}
+</style></head><body><main>
+<header><div><div class="eyebrow">FAIRVAL / MODEL COMPARISON LAB</div><h1>One quote. Multiple defensible values.</h1><p>European Black–Scholes is the baseline. American CRR and trinomial trees test early exercise. The selected research value uses the independent forecast volatility—not the circular market-IV diagnostic.</p></div>
+<label>Inspect contract<select id="contract"></select></label></header>
+<div id="empty" class="empty" hidden>No ranked contracts were available for this run.</div>
+<div id="report" hidden>
+<div class="hero-grid"><article class="panel value-card"><span class="caption">Selected forecast-volatility value</span><strong id="selectedValue">—</strong><span class="model-tag" id="modelUsed">—</span><p class="reason" id="modelReason"></p></article><div class="metrics" id="metrics"></div></div>
+<div id="warning" class="warning"></div>
+<section><h2>Price and volatility bridge</h2><p>Market-IV values explain the quote; forecast-volatility values create the research comparison.</p><div id="priceTable" class="table-wrap"></div></section>
+<section class="two-col"><div><h2>CRR convergence</h2><p>American lattice values across step counts.</p><div id="binomialTable" class="table-wrap"></div></div><div><h2>Trinomial convergence</h2><p>Independent lattice cross-check.</p><div id="trinomialTable" class="table-wrap"></div></div></section>
+<section><h2>Interpretation</h2><div class="legend"><span>Positive price edge: model value above midpoint</span><span>Positive variance edge: implied variance above forecast variance</span><span>Positive executable edge: survives quoted spread</span></div><p>This page identifies a potential pricing discrepancy under model assumptions. It is not a buy/sell instruction, does not estimate execution probability, and contains no order or hedge execution.</p></section>
+</div><div class="foot">Method foundations: <a href="https://doi.org/10.1016/0304-405X(79)90015-1">Cox, Ross &amp; Rubinstein (1979)</a>; <a href="https://doi.org/10.1111/j.1540-6261.1987.tb02569.x">Barone-Adesi &amp; Whaley (1987)</a>; exercise-style definitions and risks: <a href="https://www.theocc.com/company-information/documents-and-archives/options-disclosure-document">OCC Options Disclosure Document</a>. Continuous dividend yield is an approximation; no discrete dividend dates are invented.</div>
+</main><script>
+const contracts={payload};const select=document.getElementById("contract"),report=document.getElementById("report"),empty=document.getElementById("empty");
+const money=v=>v==null?"—":new Intl.NumberFormat("en-US",{{style:"currency",currency:"USD",maximumFractionDigits:4}}).format(v);const num=(v,d=3)=>v==null?"—":Number(v).toFixed(d);const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c]));
+function table(headers,rows){{return `<table><thead><tr>${{headers.map(x=>`<th>${{esc(x)}}</th>`).join("")}}</tr></thead><tbody>${{rows.map(row=>`<tr>${{row.map(x=>`<td>${{x}}</td>`).join("")}}</tr>`).join("")}}</tbody></table>`}}
+function convergence(rows){{return table(["Steps","Price","Δ previous","Runtime ms","Stable"],(rows||[]).map(x=>[x.steps,money(x.price),x.difference_from_previous==null?"—":num(x.difference_from_previous,5),num(x.runtime_ms,2),x.stabilized?"Yes":"No"]))}}
+function render(index){{const c=contracts[index];if(!c)return;document.getElementById("selectedValue").textContent=money(c.selectedFairValue);document.getElementById("modelUsed").textContent=c.modelUsed;document.getElementById("modelReason").textContent=c.modelReason;
+document.getElementById("metrics").innerHTML=[["Market midpoint",money(c.mid),`Bid ${{money(c.bid)}} / Ask ${{money(c.ask)}}`],["Forecast volatility",`${{num(c.forecastVolatility,2)}}%`,`Market IV ${{num(c.marketIv,2)}}%`],["Early-exercise premium",money(c.earlyExercisePremium),`Exact tree premium ${{money(c.treeExactPremium)}}`],["Model confidence",num(c.modelConfidence,2),`Spread ${{num(c.spreadPct,1)}}%`]].map(x=>`<div class="metric"><span>${{x[0]}}</span><strong>${{x[1]}}</strong><small>${{x[2]}}</small></div>`).join("");
+const warning=[c.pricingWarning,c.dataQualityWarning].filter(Boolean).join(" · ");const warningNode=document.getElementById("warning");warningNode.textContent=warning||"No pricing or data-quality warning for this snapshot.";warningNode.className=warning?"warning":"warning ok";
+document.getElementById("priceTable").innerHTML=table(["Model","Market IV value","Forecast-vol value","Midpoint edge","IV from midpoint","Runtime ms"],[["Black–Scholes",money(c.bsMarket),money(c.bsForecast),money(c.priceEdgeBs),`${{num(c.blackScholesIv,2)}}%`,num(c.blackScholesRuntimeMs,3)],["American CRR",money(c.binomialMarket),money(c.binomialForecast),money(c.priceEdgeAmerican),`${{num(c.americanIv,2)}}%`,num(c.binomialRuntimeMs,3)],["American trinomial","—",money(c.trinomialForecast),"—","—",num(c.trinomialRuntimeMs,3)],["BAW approximation","—",money(c.approximationForecast),"—","—",num(c.approximationRuntimeMs,3)]]);
+document.getElementById("binomialTable").innerHTML=convergence(c.binomialConvergence);document.getElementById("trinomialTable").innerHTML=convergence(c.trinomialConvergence)}}
+if(!contracts.length){{empty.hidden=false;select.disabled=true}}else{{contracts.forEach((c,i)=>select.add(new Option(c.label,i)));report.hidden=false;render(0);select.addEventListener("change",()=>render(Number(select.value)))}}
+</script></body></html>'''
     target.write_text(html, encoding="utf-8")
     return target

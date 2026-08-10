@@ -1,100 +1,104 @@
-# vinext-starter
+# FairVal multi-model option research
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+FairVal is a research-only option valuation stack with three connected surfaces:
 
-## Prerequisites
+- a live SPY/SPX/QQQ website under `app/`;
+- a local Robinhood overlay under `robinhood-fair-value-extension/`;
+- a pandas walk-forward volatility and scanner engine under `robinhood-fair-value-extension/volatility_research/`.
 
-- Node.js `>=22.13.0`
+It separates four quantities that are easy to mix up: the broker's market IV, an IV backsolved by a particular pricing model, the engine's forecast of future realized volatility, and the fair value produced by putting that forecast into a chosen pricing model.
 
-## Quick Start
+## Pricing architecture
 
-```bash
+The generic contract is:
+
+```text
+pricing_model.price(inputs) -> fair value
+pricing_model.greeks(inputs) -> Greeks
+implied_volatility(market_midpoint, pricing_model, inputs) -> result/status/reason
+```
+
+Implemented models are:
+
+1. European Black–Scholes without dividends.
+2. European Black–Scholes with continuous dividend yield.
+3. Cox–Ross–Rubinstein European and American binomial trees.
+4. European and American recombining trinomial trees.
+5. Barone-Adesi/Whaley as a fast American approximation and benchmark.
+
+At each American lattice node FairVal uses:
+
+```text
+continuation = discounted risk-neutral expected next value
+exercise = max(S - K, 0) for calls; max(K - S, 0) for puts
+american value = max(continuation, exercise)
+```
+
+European nodes use continuation only. This makes the American value at least as large as the same-tree European value and exposes an exercise boundary and early-exercise premium.
+
+## Model selection
+
+Explicit contract style from a data source wins. Otherwise a configurable resolver maps known index products (SPX, SPXW, XSP) to European style and U.S. equity/ETF products to American style. Every inference is disclosed.
+
+For an American contract, FairVal calculates CRR and trinomial values under market IV and forecast volatility. It selects CRR only when early-exercise value is material, the lattices agree within tolerance, and American midpoint IV solves. It retains dividend-adjusted Black–Scholes when the premium is negligible, and falls back with an explicit reason if the tree or solver fails.
+
+Market-IV fair value is diagnostic and normally close to the quote. The research comparison is:
+
+```text
+price edge = selected pricing model(forecast volatility) - market midpoint
+```
+
+The scanner then tests whether that edge survives the bid/ask spread and discounts illiquid, low-confidence, inferred-style, or poorly converged results. Outputs are potential pricing discrepancies under assumptions—not trade instructions.
+
+## Run the website
+
+```powershell
 npm install
 npm run dev
-npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+The website accepts Alpaca or Tradier credentials in the browser session. Alpaca supplies SPY/QQQ; Tradier is required for SPX in the current connector. Credentials are forwarded only to the selected market-data endpoint and are not stored in the repository.
 
-## Included Shape
+## Install the Chrome extension
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+1. Open `chrome://extensions`.
+2. Enable Developer mode.
+3. Choose **Load unpacked**.
+4. Select the entire `robinhood-fair-value-extension` directory.
+5. Reload an existing installed copy after updates.
 
-## Workspace Auth Headers
+The extension continuously scans visible Mark/IV fields at the configured interval, prices through `pricing-core.js`, and caches repeated calculations. It does not access brokerage credentials and cannot submit an order or execute a hedge.
 
-Signed-in visitors receive both `oai-authenticated-user-id` and `oai-authenticated-user-email`. Private Sites require every visitor to sign in; public Sites may also have anonymous visitors, for whom neither header is present.
+## Run the research engine
 
-The user ID is stable for the same user on the same Site and different across Sites. Email and name are intended for display or contact purposes.
+From `robinhood-fair-value-extension`:
 
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get("oai-authenticated-user-id");
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```powershell
+python -m volatility_research.cli `
+  --prices data/robinhood-daily-2022-2026.csv `
+  --options data/robinhood-options-snapshot-2026-08-05.csv `
+  --surface-history data/spy-option-surface-history-2026.csv `
+  --output-dir volatility-research-output
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+Key artifacts are `option_rankings.csv`, `variance_diagnostics_report.html`, and `pricing_diagnostics_report.html`. The pricing report supports contract selection and displays all model values, model-specific IVs, reasons, warnings, and 50/100/250/500/1000-step CRR/trinomial convergence.
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+## Verification
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+```powershell
+python -m unittest discover -s tests -p "test_*.py" -v
+node --test tests/core.test.mjs
+```
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+Tests cover Black–Scholes benchmarks and parity, generic model IV recovery, European tree convergence, American dominance, early-exercise behavior, monotonicity, short-DTE and invalid inputs, binomial/trinomial agreement, BAW benchmarking, scanner fallback, required output schema, liquidity/style warnings, no-look-ahead volatility forecasts, and absence of order execution.
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
+## Limitations
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+- Continuous dividend yield is not a discrete dividend/ex-date schedule. FairVal never invents dates.
+- Tree values retain step-size error; the live overlay uses fewer steps than the offline convergence report.
+- BAW is an approximation, not the final American source of truth.
+- Quote staleness, feed differences, bid/ask spread, liquidity, slippage, surface dynamics, jumps, earnings, and event risk can dominate a small theoretical edge.
+- Forecast volatility is uncertain. Historical out-of-sample accuracy does not establish profitable execution.
+- Black–Scholes, trees, and model IVs remain conditional on their assumptions.
 
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+The replication logic inside a tree is theoretical pricing machinery. FairVal does not buy shares, place trades, submit orders, or execute delta hedges.

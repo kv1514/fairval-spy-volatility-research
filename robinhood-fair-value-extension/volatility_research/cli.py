@@ -18,7 +18,7 @@ from .engine import (
     rank_option_contracts,
     threshold_sensitivity_study,
 )
-from .reports import write_variance_diagnostics_report
+from .reports import write_pricing_diagnostics_report, write_variance_diagnostics_report
 from .visualizations import write_visualizations
 
 
@@ -83,6 +83,7 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
         "diagnostics": output / "model_diagnostics.csv",
         "threshold_study": output / "threshold_study.csv",
         "diagnostics_report": output / "variance_diagnostics_report.html",
+        "pricing_report": output / "pricing_diagnostics_report.html",
         "latest_json": output / "latest_forecasts.json",
     }
     json_safe_frame(forecasts).to_csv(paths["forecasts"], index=False)
@@ -104,6 +105,7 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
         paths["diagnostics_report"], diagnostics, rankings, forecast_rows=len(forecasts),
         weights_history=engine.weights_history_, threshold_study=threshold_study,
     )
+    write_pricing_diagnostics_report(paths["pricing_report"], rankings)
     write_visualizations(output / "visualizations", forecasts, evaluation, engine.lambda_performance_, engine.weights_history_, rankings)
     return paths
 

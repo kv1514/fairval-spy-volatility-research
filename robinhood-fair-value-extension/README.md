@@ -1,6 +1,6 @@
-# Robinhood Fair Value Overlay
+# FairVal Multi-Model Option Research
 
-A local Chrome extension that reads any classic single-stock, ETF, or supported-index option chain visible in Robinhood and adds a strike-specific `FV`, implied-volatility basis, and quote-quality-gated research flag beside every rendered contract.
+A local Chrome extension that reads a classic single-stock, ETF, or supported-index option chain visible in Robinhood and adds a strike-specific forecast-volatility value, model selection, implied-volatility basis, and quote-quality-gated research flag beside every rendered contract.
 
 ## What it does
 
@@ -19,10 +19,13 @@ A local Chrome extension that reads any classic single-stock, ETF, or supported-
 - Adds an independent **Own forecast + market skew** mode. It shifts the live strike smile so its ATM level equals the user's realized-volatility forecast, then shows the resulting per-contract `IV EDGE` and model price.
 - Adds a **Walk-forward volatility forecast** mode backed by a Python/pandas research engine. Rather than four hardcoded windows, it searches a broad, configurable candidate set of realized-volatility windows (1D through 60D by default, extendable toward 100D) and lets out-of-sample validation decide which windows matter. It fits a dense optimized variance blend (projected-gradient over all candidate windows), a **sparse blend** that greedily keeps only the few windows that earn their place (weights below 1e-8 are dropped), the 5/10/20/60 realized baselines, a fixed blend, and coarse-to-fine EWMA λ selection, all across 1/2/3/5/10-day horizons. Model selection minimizes past out-of-sample variance error without training on unfinished targets.
 - Shows implied variance, forecast variance, implied-minus-forecast variance edge, dollar gamma, the Haugh gamma-weighted edge, vega-normalized price edge, the full greek set at market IV (delta, gamma, theta per day, vega per vol point, rho per rate point), and an approximate matched-bucket IV percentile in each badge tooltip.
+- Prices every visible contract through a common model API. The overlay keeps dividend-adjusted Black–Scholes as the European baseline, cross-checks American contracts with CRR binomial and trinomial trees, benchmarks them against the fast Barone-Adesi/Whaley approximation, and identifies the selected model plus the reason for selection.
+- Backsolves midpoint IV under both dividend-adjusted Black–Scholes and the American CRR model for exact scanned quotes. Market-IV fair values are explicitly diagnostic/circular; the displayed research value uses the selected model with forecast volatility.
+- Applies early exercise at every American tree node with `max(continuation value, intrinsic value)`. The popup exposes the scanner step count; repeated rows are cached so continuous refresh remains responsive.
 - Records exact quote snapshots and forward 15/60-minute paper outcomes locally. Long-side candidates are scored ask-to-later-bid; sell-side candidates are scored bid-to-later-ask. The popup can export or clear this JSON study.
 - Makes no brokerage-data requests, does not read account credentials, and cannot place orders. Its only external request is the public Treasury curve.
 
-The model is European-style Black–Scholes. Most U.S. single-stock and ETF contracts are American-style, so their values remain approximations even with chain-calibrated carry. SPX options are European-style, but standard AM-settled and SPXW PM-settled series can have different expiration timing that Robinhood's visible chain does not always identify.
+The model resolver treats SPX/SPXW/XSP as European-style and U.S. single-stock/ETF contracts as American-style. When the data source does not explicitly supply style, the badge says the classification was inferred. SPX standard AM-settled and SPXW PM-settled series can still have different expiration timing that Robinhood's visible chain does not always identify.
 
 ## Install in Chrome
 
@@ -32,8 +35,8 @@ The model is European-style Black–Scholes. Most U.S. single-stock and ETF cont
 4. Select this entire `robinhood-fair-value-extension` folder.
 5. Open a Robinhood classic option chain for any available stock, ETF, or supported index.
 
-A packaged build is also provided as `robinhood-fair-value-overlay-1.5.2.zip`, containing
-`manifest.json`, `content.js`, `content.css`, `popup.html`, `popup.js`, and `popup.css`. To
+A packaged build is also provided as `fairval-multi-model-extension-2.0.0.zip`, containing
+`manifest.json`, `pricing-core.js`, `content.js`, `content.css`, `popup.html`, `popup.js`, and `popup.css`. To
 install from it, unzip the archive into a folder and **Load unpacked** that folder (Chrome
 cannot load a `.zip` directly in developer mode).
 
@@ -41,7 +44,21 @@ When updating an already loaded copy, click the extension's **Reload** button on
 
 The floating panel appears at the lower left. Exact Mark/IV scanning starts automatically while a supported chain is open and repeats at the configured interval. **Refresh Mark IV now** remains available for an immediate pass. A scan only clicks strike labels to reveal public contract details; it never clicks Robinhood's green `+` order button.
 
-A small `FV $x.xx` badge is added beside each visible Robinhood price. `RH IV 20.35%` means Robinhood's exact displayed Mark IV was captured. `Ask IV 20.5%*` is an estimated ask-implied IV because that row has not been scanned yet. Hover a badge to see the full price basis.
+A small `FV $x.xx · CRR/BS-q/BS-EU` badge is added beside each visible Robinhood price. `RH IV 20.35%` means Robinhood's exact displayed Mark IV was captured. `Ask IV 20.5%*` is an estimated ask-implied IV because that row has not been scanned yet. Hover a badge to inspect Black–Scholes, CRR, trinomial, approximation, early-exercise, IV-solver, and warning details.
+
+## Pricing architecture
+
+The browser module in `pricing-core.js` and the Python research package both use the same conceptual API:
+
+```text
+pricing_model.price(inputs) -> value
+pricing_model.greeks(inputs) -> greeks
+implied_volatility(midpoint, pricing_model, inputs) -> status + volatility or failure reason
+```
+
+Implemented models are dividend-free Black–Scholes, continuous-dividend Black–Scholes, European/American CRR, European/American trinomial, and Barone-Adesi/Whaley as a fast American benchmark. CRR is selected for an American contract only when its early-exercise premium is material, its midpoint IV can be solved, and the independent trinomial value agrees within tolerance. Otherwise FairVal explains why it retained or fell back to dividend-adjusted Black–Scholes.
+
+The exact tree early-exercise premium compares American and European values on the same lattice. The scanner's displayed premium compares American value with the analytic dividend-adjusted Black–Scholes baseline and floors tiny negative discretization noise at zero.
 
 ## Research flags
 
@@ -73,6 +90,8 @@ The panel ranks up to five flags by edge-to-spread coverage. A flag means “rec
 - **Minimum edge %** controls how far the model must remain beyond the executable ask or bid before a contract is flagged.
 - **Maximum spread %** rejects illiquid quotes whose spread can explain the apparent discrepancy.
 - A positive difference means the model value is above Robinhood's displayed reference price; a negative difference means it is below. It is not a buy or sell recommendation and does not estimate execution probability.
+- `CRR` means the American binomial value was selected. `BS-q` means dividend-adjusted Black–Scholes remained selected because exercise value was negligible or the American diagnostics failed a gate. `BS-EU` is the European index baseline.
+- American-model IV and Black–Scholes IV are separately backsolved from midpoint; neither is the same thing as the walk-forward realized-volatility forecast.
 
 For scanned rows, the extension compares fair value with Robinhood's exact Mark and reports Robinhood's displayed IV verbatim. For unscanned rows, it compares with the visible Ask/Bid/Mark column and marks the calculated IV with `*`.
 
@@ -84,7 +103,15 @@ For scanned rows, the extension compares fair value with Robinhood's exact Mark 
 - SPX: S&P Dow Jones Indices' S&P 500 dividend yield, modeled as a continuous index yield.
 - QQQ: annualized recent QQQ distributions, converted into estimated quarterly cash dividends and applied only when an ex-date falls before expiration.
 
-These are transparent screen-grade approximations, not OPRA/Cboe professional analytics. Cboe's production methodology uses NBBO data, a full interest-rate curve, forward discrete-dividend forecasts, and an American-style model where applicable. The extension therefore labels output as research candidates rather than trade recommendations.
+These are transparent screen-grade approximations, not OPRA/Cboe professional analytics. Professional analytics can use NBBO data, a full interest-rate curve, discrete-dividend forecasts, and contract-reference data unavailable in the DOM. FairVal never invents ex-dividend dates: when a schedule is unavailable it uses a continuous-yield approximation and warns. The extension labels output as potential discrepancies under assumptions rather than trade recommendations.
+
+## Model limitations
+
+- Continuous dividend yield cannot reproduce a known discrete cash dividend or the precise call exercise decision immediately before an ex-date.
+- CRR and trinomial values retain step-size error; the offline diagnostics report checks 50, 100, 250, 500, and 1,000 steps. The live overlay uses a configurable smaller count for responsiveness.
+- Barone-Adesi/Whaley is a fast approximation and a benchmark, not the final source of truth.
+- Volatility smile, jumps, earnings, event risk, stale quotes, wide spreads, slippage, and forecast error can dominate a small theoretical premium.
+- A model value is conditional on spot, time, rate, dividend, volatility, style, and quote timestamp. It is not a guaranteed executable price.
 
 See [SOURCES.md](SOURCES.md) for the source URLs, as-of dates, embedded fallback curve, and interpretation notes.
 

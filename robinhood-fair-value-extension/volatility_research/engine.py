@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from .black_scholes import black_scholes_greeks, black_scholes_price
+from .pricing_models import PricingInputs, contract_pricing_diagnostics
 from .surface import add_volatility_surface_context, prepare_surface_contracts, surface_benchmark_records
 
 
@@ -756,6 +757,8 @@ def rank_option_contracts(
     max_spread_percent: float = 20.0,
     minimum_volume: int = 10,
     minimum_open_interest: int = 100,
+    tree_steps: int = 75,
+    style_map: dict[str, dict[str, str]] | None = None,
 ) -> pd.DataFrame:
     required = ("ticker", "date", "expiration", "option_type", "strike", "market_iv", "bid", "ask", "volume", "open_interest")
     _validate_columns(options, required, "options")
@@ -776,7 +779,9 @@ def rank_option_contracts(
     # These columns are explicit annualized percent inputs (for example, 4.25),
     # so do not guess whether a small value was intended as a decimal.
     ranked["rate"] = pd.to_numeric(ranked["rate"], errors="coerce") if "rate" in ranked else 0.0
-    ranked["dividend"] = pd.to_numeric(ranked["dividend"], errors="coerce") if "dividend" in ranked else 0.0
+    dividend_data_available = "dividend" in ranked
+    ranked["dividend"] = pd.to_numeric(ranked["dividend"], errors="coerce") if dividend_data_available else 0.0
+    ranked["dividend_data_available"] = dividend_data_available
 
     if "spot" not in ranked:
         if prices is None:
@@ -803,22 +808,51 @@ def rank_option_contracts(
         selected_rows.append(eligible.iloc[-1] if not eligible.empty else None)
     ranked["forecast_vol"] = [row["forecast_vol"] if row is not None else np.nan for row in selected_rows]
     ranked["forecast_as_of"] = [row["date"] if row is not None else pd.NaT for row in selected_rows]
-    ranked["model_used"] = [row["model_used"] if row is not None else None for row in selected_rows]
+    ranked["forecast_model_used"] = [row["model_used"] if row is not None else None for row in selected_rows]
     ranked["lambda_used"] = [row["lambda_used"] if row is not None else np.nan for row in selected_rows]
     ranked["weights_used"] = [row["weights_used"] if row is not None else None for row in selected_rows]
     ranked["future_realized_vol"] = [row["future_realized_vol"] if row is not None else np.nan for row in selected_rows]
     ranked = ranked.dropna(subset=["spot", "strike", "market_iv", "forecast_vol", "market_mid", "bid", "ask"])
 
+    ranked["underlying_price"] = ranked["spot"]
+    ranked["last_price"] = pd.to_numeric(ranked["last_price"], errors="coerce") if "last_price" in ranked else np.nan
+    ranked["spread"] = ranked["ask"] - ranked["bid"]
     ranked["vol_edge"] = ranked["forecast_vol"] - ranked["market_iv"]
-    ranked["model_fair_value"] = black_scholes_price(
-        ranked["spot"], ranked["strike"], ranked["dte"], ranked["forecast_vol"],
-        ranked["rate"], ranked["dividend"], ranked["option_type"],
+
+    pricing_rows: list[dict] = []
+    for row in ranked.itertuples(index=False):
+        pricing_rows.append(contract_pricing_diagnostics(
+            ticker=row.ticker,
+            market_mid=float(row.market_mid),
+            market_iv=float(row.market_iv),
+            forecast_volatility=float(row.forecast_vol),
+            inputs=PricingInputs(
+                spot=float(row.spot), strike=float(row.strike), dte=float(row.dte),
+                volatility=float(row.market_iv), rate=float(row.rate), dividend=float(row.dividend),
+                option_type=str(row.option_type), exercise_style="european",
+            ),
+            option_style=getattr(row, "option_style", None),
+            instrument_type=getattr(row, "instrument_type", None),
+            style_map=style_map,
+            tree_steps=tree_steps,
+        ))
+    pricing_frame = pd.DataFrame(pricing_rows, index=ranked.index)
+    # Avoid duplicate source columns (for example instrument_type supplied by a
+    # broker) while keeping the pricing resolver's normalized result explicit.
+    for column in pricing_frame.columns:
+        ranked[column] = pricing_frame[column]
+
+    # Backwards-compatible aliases now point to the selected forecast-volatility
+    # model, never to the circular market-IV diagnostic.
+    ranked["model_fair_value"] = ranked["selected_model_fair_value"]
+    ranked["market_iv_fair_value"] = ranked["bs_market_iv_fair_value"]
+    ranked["forecast_volatility"] = ranked["forecast_vol"]
+    ranked["price_edge_bs"] = ranked["bs_forecast_vol_fair_value"] - ranked["market_mid"]
+    ranked["price_edge_american"] = ranked["american_forecast_vol_fair_value"] - ranked["market_mid"]
+    ranked["price_edge_american"] = ranked["price_edge_american"].where(
+        ranked["american_forecast_vol_fair_value"].notna(), ranked["price_edge_bs"],
     )
-    ranked["market_iv_fair_value"] = black_scholes_price(
-        ranked["spot"], ranked["strike"], ranked["dte"], ranked["market_iv"],
-        ranked["rate"], ranked["dividend"], ranked["option_type"],
-    )
-    ranked["price_edge"] = ranked["model_fair_value"] - ranked["market_mid"]
+    ranked["price_edge"] = ranked["selected_model_fair_value"] - ranked["market_mid"]
     ranked["implied_variance"] = np.square(ranked["market_iv"] / 100.0)
     ranked["forecast_variance"] = np.square(ranked["forecast_vol"] / 100.0)
     # Haugh equation (24) uses implied variance minus realized variance for the
@@ -828,11 +862,6 @@ def rank_option_contracts(
         ranked["spot"], ranked["strike"], ranked["dte"], ranked["market_iv"],
         ranked["rate"], ranked["dividend"], ranked["option_type"],
     )
-    ranked["gamma"] = greeks["gamma"]
-    ranked["vega"] = greeks["vega"]
-    ranked["delta"] = greeks["delta"]
-    ranked["theta"] = greeks["theta"]
-    ranked["rho"] = greeks["rho"]
     ranked["dollar_gamma"] = 0.5 * np.square(ranked["spot"]) * ranked["gamma"]
     ranked["gamma_weighted_edge"] = (
         ranked["dollar_gamma"] * ranked["variance_edge"] * greeks["time_years"]
@@ -847,8 +876,18 @@ def rank_option_contracts(
     )
     ranked["spread_pct"] = np.where(
         ranked["market_mid"] > 0,
-        (ranked["ask"] - ranked["bid"]) / ranked["market_mid"] * 100.0,
+        ranked["spread"] / ranked["market_mid"] * 100.0,
         np.inf,
+    )
+    ranked["edge_after_spread_bs"] = np.where(
+        ranked["price_edge_bs"] >= 0,
+        ranked["bs_forecast_vol_fair_value"] - ranked["ask"],
+        ranked["bid"] - ranked["bs_forecast_vol_fair_value"],
+    )
+    ranked["edge_after_spread_american"] = np.where(
+        ranked["price_edge_american"] >= 0,
+        ranked["american_forecast_vol_fair_value"].fillna(ranked["bs_forecast_vol_fair_value"]) - ranked["ask"],
+        ranked["bid"] - ranked["american_forecast_vol_fair_value"].fillna(ranked["bs_forecast_vol_fair_value"]),
     )
     ranked["research_direction"] = np.where(ranked["price_edge"] >= 0, "below-model", "above-model")
     ranked["candidate_side"] = np.select(
@@ -878,6 +917,34 @@ def rank_option_contracts(
         & (ranked["ask"] >= ranked["bid"])
         & (ranked["market_mid"] >= 0.10)
     )
+    def data_warnings(row: pd.Series) -> str:
+        items: list[str] = []
+        if row["ask"] < row["bid"]:
+            items.append("invalid bid/ask")
+        if row["spread_pct"] > max_spread_percent:
+            items.append("wide bid-ask spread")
+        if row["volume"] < minimum_volume:
+            items.append("low volume")
+        if row["open_interest"] < minimum_open_interest:
+            items.append("low open interest")
+        if not bool(row["dividend_data_available"]):
+            items.append("dividend data unavailable; 0% continuous yield assumed")
+        return "; ".join(items)
+
+    ranked["data_quality_warning"] = ranked.apply(data_warnings, axis=1)
+    ranked["pricing_warning"] = [
+        "; ".join(part for part in (str(pricing or "").strip(), str(data or "").strip()) if part)
+        for pricing, data in zip(ranked["pricing_warning"], ranked["data_quality_warning"])
+    ]
+    # Liquidity and observable-data quality are part of confidence, not an
+    # afterthought applied only to the final rank.
+    liquidity_confidence = np.where(
+        ranked["liquidity_pass"], 1.0,
+        np.where(ranked["ask"] >= ranked["bid"], 0.55, 0.0),
+    )
+    ranked["model_confidence"] = (
+        0.75 * ranked["model_confidence"].astype(float) + 0.25 * liquidity_confidence
+    ).clip(lower=0.0, upper=1.0)
     ranked["liquidity_score"] = np.log1p(ranked["volume"].clip(lower=0)) + 0.5 * np.log1p(ranked["open_interest"].clip(lower=0))
     ranked["surface_context_pass"] = np.select(
         [
@@ -920,7 +987,8 @@ def rank_option_contracts(
         + 0.25 * ranked["executable_edge_score"]
         + 0.15 * ranked["gamma_edge_score"]
         + 0.10 * ranked["surface_context_score"]
-        + 0.10 * ranked["liquidity_rank_score"]
+        + 0.05 * ranked["liquidity_rank_score"]
+        + 0.05 * ranked["model_confidence"]
     )
     ranked["research_bucket"] = np.select(
         [
@@ -941,17 +1009,23 @@ def rank_option_contracts(
     ranked["contract_rank"] = grouped["composite_score"].rank(method="first", ascending=False).astype(int)
 
     required_output = [
-        "ticker", "date", "expiration", "dte", "option_type", "strike", "market_iv", "forecast_vol",
-        "vol_edge", "implied_variance", "forecast_variance", "variance_edge", "dollar_gamma",
-        "gamma_weighted_edge", "vega_normalized_edge", "market_mid", "model_fair_value",
-        "market_iv_fair_value", "price_edge", "bid", "ask",
-        "spread_pct", "volume", "open_interest", "model_used", "lambda_used", "weights_used",
+        "ticker", "underlying_price", "date", "expiration", "dte", "option_type", "strike",
+        "bid", "ask", "market_mid", "last_price", "market_iv", "black_scholes_iv",
+        "american_model_iv", "forecast_volatility", "bs_market_iv_fair_value",
+        "bs_forecast_vol_fair_value", "american_market_iv_fair_value",
+        "american_forecast_vol_fair_value", "selected_model_fair_value", "early_exercise_premium",
+        "price_edge_bs", "price_edge_american", "edge_after_spread_bs", "edge_after_spread_american",
+        "vol_edge", "implied_variance", "forecast_variance", "variance_edge", "delta", "gamma",
+        "theta", "vega", "rho", "american_delta", "american_gamma", "spread", "spread_pct",
+        "volume", "open_interest", "model_used", "model_reason", "model_confidence",
+        "pricing_warning", "data_quality_warning", "forecast_model_used", "lambda_used", "weights_used",
     ]
     extras = [
-        "forecast_as_of", "forecast_horizon", "spot", "rate", "dividend", "research_direction",
+        "forecast_as_of", "forecast_horizon", "spot", "rate", "dividend", "option_style",
+        "style_verified", "instrument_type", "dividend_data_available", "research_direction",
         "edge_after_bid_ask", "edge_after_bid_ask_pct", "liquidity_pass", "composite_score",
         "research_bucket", "contract_rank", "future_realized_vol", "direction_correct_vs_market_iv",
-        "delta", "gamma", "theta", "vega", "rho",
+        "dollar_gamma", "gamma_weighted_edge", "vega_normalized_edge",
         "gamma_weighted_edge_contract", "contract_multiplier", "candidate_side",
         "moneyness", "log_moneyness", "moneyness_bucket", "dte_bucket", "atm_iv",
         "contract_iv_minus_atm_iv", "iv_skew_slope_per_10pct_moneyness",
@@ -959,6 +1033,15 @@ def rank_option_contracts(
         "term_spread_2d_minus_1d", "term_spread_5d_minus_2d", "term_spread_10d_minus_5d",
         "iv_percentile", "iv_percentile_observations", "historical_bucket_iv_median",
         "iv_minus_historical_bucket_median", "surface_context_pass", "surface_context_status",
+        "black_scholes_no_dividend_market_iv_fair_value", "binomial_market_iv_fair_value",
+        "trinomial_market_iv_fair_value", "approximation_market_iv_fair_value",
+        "binomial_forecast_vol_fair_value", "trinomial_forecast_vol_fair_value",
+        "approximation_forecast_vol_fair_value", "binomial_american_iv", "trinomial_american_iv",
+        "selected_model_iv", "iv_solver_status", "iv_solver_warning", "tree_early_exercise_premium",
+        "tree_model_difference", "tree_convergence_status", "price_edge", "model_fair_value",
+        "tree_steps_used", "black_scholes_runtime_ms", "binomial_runtime_ms",
+        "trinomial_runtime_ms", "approximation_runtime_ms", "selected_model_runtime_ms",
+        "market_iv_fair_value", "forecast_vol",
     ]
     return ranked[required_output + extras].sort_values(["ticker", "date", "contract_rank"]).reset_index(drop=True)
 

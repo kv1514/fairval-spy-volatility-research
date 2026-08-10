@@ -236,6 +236,14 @@ button { color: inherit; }
 .fair-value-block > strong { display: block; margin: 8px 0 4px; font-family: var(--mono); font-size: clamp(48px, 4.3vw, 66px); font-weight: 480; letter-spacing: -.075em; }
 .fair-value-block > small { color: #70797e; font-size: 10px; }
 
+.pricing-diagnostics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0; padding: 14px 0; border-bottom: 1px solid var(--ink); }
+.pricing-diagnostics > div { padding: 8px 10px 8px 0; }
+.pricing-diagnostics span, .pricing-diagnostics strong { display: block; font-family: var(--mono); }
+.pricing-diagnostics span { color: #788084; font-size: 7px; letter-spacing: .08em; }
+.pricing-diagnostics strong { margin-top: 4px; font-size: 9px; overflow-wrap: anywhere; }
+.pricing-diagnostics p { grid-column: 1 / -1; margin: 8px 0 0; color: #657077; font-size: 9px; line-height: 1.5; }
+.pricing-diagnostics .circular-note { padding: 8px 10px; border-left: 2px solid var(--amber); background: #f6eddd; color: #6e634f; }
+
 .comparison-block { padding: 22px 0; border-bottom: 1px solid var(--line); }
 .comparison-copy { display: flex; align-items: baseline; justify-content: space-between; }
 .comparison-copy span { color: #747d81; font-family: var(--mono); font-size: 8px; letter-spacing: .09em; }

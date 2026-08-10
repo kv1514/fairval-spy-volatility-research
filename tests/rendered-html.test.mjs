@@ -22,7 +22,7 @@ test("server-renders the live pricing workbench without sample quotes", async ()
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>BlackScholes Lab - Live Options Fair Value<\/title>/i);
+  assert.match(html, /<title>FairVal Lab - Multi-Model Option Research<\/title>/i);
   assert.match(html, /DATA OFFLINE/);
   assert.match(html, /NO SAMPLE DATA/);
   assert.match(html, /No fabricated option prices are shown\./);
@@ -45,6 +45,10 @@ test("uses authenticated providers and intraday New York expiry timing", async (
   assert.doesNotMatch(route, /demoResponse|Illustrative chain/);
   assert.match(pricing, /America\/New_York/);
   assert.match(pricing, /settlementMinutes = 16 \* 60 \+ 15/);
+  assert.match(pricing, /calculateCrr/);
+  assert.match(pricing, /calculateTrinomial/);
+  assert.match(pricing, /impliedVolatility/);
+  assert.match(pricing, /sameTreeExercisePremium/);
   assert.match(page, /No fabricated option prices are shown/);
   assert.match(page, /OPRA · Algo Trader Plus/);
   assert.match(page, /Auto · OPRA if entitled/);
