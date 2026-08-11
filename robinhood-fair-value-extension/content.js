@@ -914,6 +914,42 @@
   const pricingCache = new Map();
   const recordedCaptureTimes = new Map();
 
+  function validForecastPayload(payload) {
+    return payload?.schema === "volatility_forecast.v1" &&
+      Array.isArray(payload.records) &&
+      payload.records.length > 0 &&
+      payload.records.every((record) =>
+        record?.ticker &&
+        Number.isFinite(Number(record.horizon)) &&
+        Number.isFinite(Number(record.forecast_vol))
+      );
+  }
+
+  function forecastTimestamp(payload) {
+    const timestamp = Date.parse(payload?.generated_at || payload?.updated_at || "");
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+
+  async function loadBundledForecast(existingPayload) {
+    const existingValid = validForecastPayload(existingPayload);
+    try {
+      const url = chrome.runtime.getURL("volatility-research-output/latest_forecasts.json");
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) throw new Error(`Bundled forecast returned ${response.status}`);
+      const bundled = await response.json();
+      if (!validForecastPayload(bundled)) throw new Error("Bundled forecast payload is invalid");
+
+      const bundledIsNewer = forecastTimestamp(bundled) > forecastTimestamp(existingPayload);
+      if (!existingValid || bundledIsNewer) {
+        chrome.storage.local.set({ volatilityForecastV1: bundled });
+        return { payload: bundled, firstImport: !existingValid };
+      }
+      return { payload: existingPayload, firstImport: false };
+    } catch {
+      return { payload: existingValid ? existingPayload : null, firstImport: false };
+    }
+  }
+
   async function refreshTreasuryCurve() {
     const year = new Date().getUTCFullYear();
     const url = `https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value=${year}`;
@@ -1213,6 +1249,8 @@
 
   function syncPanel(context = pageContext(), details = {}) {
     const panel = ensurePanel();
+    panel.dataset.bsfvBuild = "2.0.1";
+    panel.dataset.bsfvForecastRecords = String(volatilityForecast?.records?.length || 0);
     panel.classList.toggle("is-collapsed", settings.collapsed);
     panel.querySelector("#bsfv-panel-body").hidden = settings.collapsed;
     panel.querySelector("#bsfv-collapse").textContent = settings.collapsed ? "+" : "−";
@@ -1259,7 +1297,7 @@
     const ivCopy = settings.ivSource === "walkforward"
       ? details.forecastRecord
         ? `walk-forward ${details.forecastRecord.forecastVol.toFixed(2)}% · ${details.forecastRecord.modelUsed} · h${details.forecastRecord.horizon} · as of ${details.forecastRecord.asOfDate}`
-        : `walk-forward forecast missing for ${context.ticker}; import latest_forecasts.json`
+        : `walk-forward forecast missing for ${context.ticker}; ${volatilityForecast?.records?.length || 0} bundled records loaded`
       : settings.ivSource === "surface"
       ? `neighbor smile from ${details.validIvCount ?? 0}/${details.totalRows ?? 0} visible IVs`
       : settings.ivSource === "forecast"
@@ -1582,7 +1620,18 @@
         ? rawAlert
         : { flagged: false };
       const ivEdge = Number.isFinite(marketIv) ? fairIv - marketIv : null;
-      return { ...contract, fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark, pricing };
+      return {
+        ...contract,
+        fairIv,
+        fairValue,
+        difference,
+        ivEdge,
+        alert,
+        variance,
+        surfaceBenchmark,
+        pricing,
+        marketGreeks,
+      };
     }).filter(Boolean);
     const alerts = pricedContracts
       .filter((contract) => contract.alert.flagged)
@@ -1616,7 +1665,7 @@
     for (const contract of pricedContracts) {
       const {
         row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv,
-        fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark, pricing,
+        fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark, pricing, marketGreeks,
       } = contract;
       let badge = priceCell.querySelector("[data-bsfv-overlay]");
       if (!badge) {
@@ -1693,10 +1742,17 @@
       treasuryCurve: FALLBACK_TREASURY_CURVE,
       paperStudyV1: paperStudy,
       volatilityForecastV1: volatilityForecast,
-    }, (saved) => {
+    }, async (saved) => {
       if (saved.treasuryCurve?.points?.length) treasuryCurve = saved.treasuryCurve;
-      if (saved.volatilityForecastV1?.schema === "volatility_forecast.v1") {
-        volatilityForecast = saved.volatilityForecastV1;
+      const bundledForecast = await loadBundledForecast(saved.volatilityForecastV1);
+      if (bundledForecast.payload) {
+        volatilityForecast = bundledForecast.payload;
+      }
+      if (bundledForecast.firstImport) {
+        chrome.storage.sync.set({
+          ivSource: "walkforward",
+          settingsVersion: DEFAULT_SETTINGS.settingsVersion,
+        });
       }
       if (Array.isArray(saved.paperStudyV1?.records)) {
         const normalized = thinPaperRecords(saved.paperStudyV1.records).slice(-10_000);

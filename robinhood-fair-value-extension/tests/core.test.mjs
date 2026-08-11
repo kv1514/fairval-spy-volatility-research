@@ -5,6 +5,11 @@ import vm from "node:vm";
 
 const source = await readFile(new URL("../content.js", import.meta.url), "utf8");
 const pricingSource = await readFile(new URL("../pricing-core.js", import.meta.url), "utf8");
+const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
+const bundledForecast = JSON.parse(await readFile(
+  new URL("../volatility-research-output/latest_forecasts.json", import.meta.url),
+  "utf8",
+));
 const context = vm.createContext({
   Date,
   Intl,
@@ -21,6 +26,21 @@ vm.runInContext(pricingSource, context);
 vm.runInContext(source, context);
 const core = context.__BSFV_CORE__;
 const pricing = context.FairValPricing;
+
+test("bundles a valid walk-forward forecast bridge for Robinhood", () => {
+  const exposedResources = manifest.web_accessible_resources
+    ?.flatMap((entry) => entry.resources || []) || [];
+  assert.ok(exposedResources.includes("volatility-research-output/latest_forecasts.json"));
+  assert.equal(bundledForecast.schema, "volatility_forecast.v1");
+  assert.ok(bundledForecast.records.length > 0);
+  assert.deepEqual(
+    [...new Set(bundledForecast.records.map((record) => record.ticker))].sort(),
+    ["QQQ", "SPX", "SPY"],
+  );
+  assert.ok(bundledForecast.records.every((record) =>
+    Number.isFinite(Number(record.horizon)) && Number.isFinite(Number(record.forecast_vol))
+  ));
+});
 
 test("multi-model core prices European benchmarks and American exercise", () => {
   const input = { spot: 100, strike: 100, days: 365, volatility: 20, rate: 5, dividend: 0, optionType: "call", exerciseStyle: "european" };

@@ -310,6 +310,7 @@ export default function Home() {
           <span>FairVal <span className="brand-muted">Lab</span></span>
         </a>
         <div className="header-actions">
+          <a className="research-link" href="/research">Outcome study</a>
           <div className={`feed-status ${market?.status === "live" ? "is-live" : market?.status === "indicative" ? "is-indicative" : ""}`}>
             <span className="status-dot" aria-hidden="true" />
             <span>{market ? market.feed : "DATA OFFLINE"}</span>

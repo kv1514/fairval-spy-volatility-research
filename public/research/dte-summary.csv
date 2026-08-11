@@ -1,0 +1,12 @@
+dte,dataAvailable,observedContracts,candidates,actionable,closeHitRate,optimisticHitRate,meanNetPnl,meanNetContractDollars,winRate
+0,true,230,1,1,0,1,-1.685,-168.5,0
+1,true,244,17,14,0.642857,0.857143,-0.009892,-0.99,0.642857
+2,true,237,2,2,0.5,0.5,0.070859,7.09,0.5
+3,true,261,6,6,0.666667,0.666667,0.13902,13.9,0.666667
+4,true,192,20,20,0.5,0.65,-0.431478,-43.15,0.5
+5,false,0,0,0,,,,,
+6,false,0,0,0,,,,,
+7,false,0,0,0,,,,,
+8,false,0,0,0,,,,,
+9,false,0,0,0,,,,,
+10,false,0,0,0,,,,,

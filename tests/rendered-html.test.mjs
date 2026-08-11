@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function render() {
+async function render(pathname = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
 
   return worker.fetch(
-    new Request("http://localhost/", { headers: { accept: "text/html" } }),
+    new Request(`http://localhost${pathname}`, { headers: { accept: "text/html" } }),
     {
       ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
     },
@@ -29,6 +29,19 @@ test("server-renders the live pricing workbench without sample quotes", async ()
   assert.match(html, /Connect market data/);
   assert.doesNotMatch(html, /DEMO FEED|Demo market is active|741\.82/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
+});
+
+test("server-renders the outcome study with an explicit holdout and data gaps", async () => {
+  const response = await render("/research");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Did the .cheap. options/);
+  assert.match(html, /Interesting holdout/);
+  assert.match(html, /Not proven/);
+  assert.match(html, /above the observed trade/);
+  assert.match(html, /0–10 DTE, with the holes left visible/);
+  assert.match(html, /A screen, not an arbitrage claim/);
+  assert.match(html, /NON-NEGOTIABLE LIMITATIONS/);
 });
 
 test("uses authenticated providers and intraday New York expiry timing", async () => {

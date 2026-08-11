@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FairVal Multi-Model Option Research",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Compares forecast-volatility values under European Black-Scholes and American tree models with explicit diagnostics.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://home.treasury.gov/*"],
@@ -15,6 +15,12 @@
       "js": ["pricing-core.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["volatility-research-output/latest_forecasts.json"],
+      "matches": ["https://robinhood.com/*"]
     }
   ]
 }
