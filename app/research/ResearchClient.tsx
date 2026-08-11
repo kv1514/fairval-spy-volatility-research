@@ -137,6 +137,7 @@ const dateLabel = (date: string) => new Intl.DateTimeFormat("en-US", {
   day: "numeric",
   timeZone: "UTC",
 }).format(new Date(`${date}T12:00:00Z`));
+const candidateKey = (candidate: Candidate) => `${candidate.id}|${candidate.date}`;
 
 function PricePathChart({ candidate }: { candidate: Candidate }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -228,10 +229,10 @@ export default function ResearchClient({ study }: { study: StudyData }) {
   const initialCandidate = study.candidates.find((candidate) => candidate.phase === "holdout" && candidate.actionable)
     ?? study.candidates.find((candidate) => candidate.actionable)
     ?? study.candidates[0];
-  const [selectedId, setSelectedId] = useState(initialCandidate?.id ?? "");
+  const [selectedId, setSelectedId] = useState(initialCandidate ? candidateKey(initialCandidate) : "");
   const [phase, setPhase] = useState<"holdout" | "all">("holdout");
   const [dte, setDte] = useState<"all" | number>("all");
-  const selected = study.candidates.find((candidate) => candidate.id === selectedId) ?? initialCandidate;
+  const selected = study.candidates.find((candidate) => candidateKey(candidate) === selectedId) ?? initialCandidate;
   const rows = useMemo(() => study.candidates
     .filter((candidate) => candidate.actionable)
     .filter((candidate) => phase === "all" || candidate.phase === "holdout")
@@ -353,9 +354,9 @@ export default function ResearchClient({ study }: { study: StudyData }) {
             </div>
             <label>
               <span>CONTRACT</span>
-              <select value={selected.id} onChange={(event) => setSelectedId(event.target.value)}>
+              <select value={candidateKey(selected)} onChange={(event) => setSelectedId(event.target.value)}>
                 {study.candidates.filter((candidate) => candidate.actionable).map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
+                  <option key={candidateKey(candidate)} value={candidateKey(candidate)}>
                     {candidate.date} · {candidate.dte}DTE · {candidate.optionType.toUpperCase()} {candidate.strike} · {candidate.edgePercent.toFixed(0)}% gap
                   </option>
                 ))}
@@ -397,7 +398,7 @@ export default function ResearchClient({ study }: { study: StudyData }) {
             <thead><tr><th>Date</th><th>Contract</th><th>DTE</th><th>Entry</th><th>FV target</th><th>Vol edge</th><th>Gap</th><th>Target</th><th>Net / contract</th></tr></thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={`${row.id}-${row.date}`} onClick={() => setSelectedId(row.id)}>
+                <tr key={candidateKey(row)} onClick={() => setSelectedId(candidateKey(row))}>
                   <td>{dateLabel(row.date)}<small>{row.phase}</small></td>
                   <td><b>{row.optionType[0].toUpperCase()} {row.strike}</b><small>exp {dateLabel(row.expiration)}</small></td>
                   <td>{row.dte}</td>
