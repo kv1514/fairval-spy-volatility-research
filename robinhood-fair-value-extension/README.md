@@ -1,6 +1,6 @@
-# FairVal Multi-Model Option Research
+# FairVal SPY Volatility Research
 
-A local Chrome extension that reads a classic single-stock, ETF, or supported-index option chain visible in Robinhood and adds a strike-specific forecast-volatility value, model selection, implied-volatility basis, and quote-quality-gated research flag beside every rendered contract.
+A local Chrome extension that reads a SPY option chain visible in Robinhood and adds strike-specific forecast-volatility values, model selection, implied-volatility context, and quote-quality-gated research candidates. Pricing still renders on other supported symbols, but version 2.1 intentionally ranks strategies only for SPY.
 
 ## What it does
 
@@ -8,6 +8,7 @@ A local Chrome extension that reads a classic single-stock, ETF, or supported-in
 - Recalculates as Robinhood's virtualized option chain updates.
 - Reads Robinhood's exact Mark and displayed IV whenever a contract is expanded, and caches them for that chain.
 - Automatically refreshes every rendered contract's exact Mark/IV every 30 seconds by default. The interval is configurable from 15 to 300 seconds, so no repeated refresh click is required.
+- Recalculates displayed fair value every second as spot and time change. The independent realized-volatility forecast updates after a completed daily close, not on every quote tick.
 - Uses a clearly starred Ask-implied IV estimate only for rows that have not yet been expanded or scanned.
 - Builds an outlier-resistant local IV smile for relative fair-value comparisons. A contract's own quote is excluded from its fair-IV estimate, and robust local regression reduces contamination from a bad neighboring quote.
 - When Robinhood displays an extended-hours ETF price beside a frozen option quote, removes the displayed after-hours or pre-market move and uses the regular-session close paired with that quote.
@@ -22,7 +23,10 @@ A local Chrome extension that reads a classic single-stock, ETF, or supported-in
 - Prices every visible contract through a common model API. The overlay keeps dividend-adjusted Black–Scholes as the European baseline, cross-checks American contracts with CRR binomial and trinomial trees, benchmarks them against the fast Barone-Adesi/Whaley approximation, and identifies the selected model plus the reason for selection.
 - Backsolves midpoint IV under both dividend-adjusted Black–Scholes and the American CRR model for exact scanned quotes. Market-IV fair values are explicitly diagnostic/circular; the displayed research value uses the selected model with forecast volatility.
 - Applies early exercise at every American tree node with `max(continuation value, intrinsic value)`. The popup exposes the scanner step count; repeated rows are cached so continuous refresh remains responsive.
-- Records exact quote snapshots and forward 15/60-minute paper outcomes locally. Long-side candidates are scored ask-to-later-bid; sell-side candidates are scored bid-to-later-ask. The popup can export or clear this JSON study.
+- Ranks SPY-only defined-risk verticals and equal-width butterflies using executable prices on every leg. It also exposes outright delta-hedged volatility candidates as paper research only.
+- Rejects structures unless every leg has a fresh exact quote and matched historical context and the modeled edge exceeds both the configured threshold and the complete quoted round-trip spread estimate.
+- Records exact quote snapshots and forward 15/60-minute paper outcomes locally. Long-side candidates are scored ask-to-later-bid; sell-side candidates are scored bid-to-later-ask. Option P&L, the initial-delta SPY hedge, and gross delta-hedged P&L are reported separately. The popup can export or clear this JSON study.
+- Marks a daily forecast older than four calendar days as stale and blocks it from generating flags or strategy candidates. Fair-value output remains visible with the stale warning.
 - Makes no brokerage-data requests, does not read account credentials, and cannot place orders. Its only external request is the public Treasury curve.
 
 The model resolver treats SPX/SPXW/XSP as European-style and U.S. single-stock/ETF contracts as American-style. When the data source does not explicitly supply style, the badge says the classification was inferred. SPX standard AM-settled and SPXW PM-settled series can still have different expiration timing that Robinhood's visible chain does not always identify.
@@ -33,10 +37,10 @@ The model resolver treats SPX/SPXW/XSP as European-style and U.S. single-stock/E
 2. Turn on **Developer mode**.
 3. Choose **Load unpacked**.
 4. Select this entire `robinhood-fair-value-extension` folder.
-5. Open a Robinhood classic option chain for any available stock, ETF, or supported index.
+5. Open a Robinhood classic SPY option chain.
 
-A packaged build is also provided as `fairval-multi-model-extension-2.0.0.zip`, containing
-`manifest.json`, `pricing-core.js`, `content.js`, `content.css`, `popup.html`, `popup.js`, and `popup.css`. To
+A packaged build is also provided as `fairval-spy-research-extension-2.1.0.zip`, containing
+`manifest.json`, `pricing-core.js`, `strategy-core.js`, `content.js`, `content.css`, `popup.html`, `popup.js`, `popup.css`, and the bundled SPY forecast. To
 install from it, unzip the archive into a folder and **Load unpacked** that folder (Chrome
 cannot load a `.zip` directly in developer mode).
 
@@ -75,6 +79,10 @@ The green or red `FLAG` treatment is an idea-generation screen, not a buy/sell i
 Flags require a walk-forward, own-forecast, or manual volatility view; circular market-smile and individual-market-IV modes cannot trigger them. For an arbitrary ticker, flags also remain disabled until carry is calibrated or supplied manually and until the imported JSON contains a matched historical IV bucket. This prevents an unknown yield or normal downside skew from masquerading as a pricing opportunity.
 
 The panel ranks up to five flags by edge-to-spread coverage. A flag means “record and review this contract and its assumptions,” not “place this trade.” Automatic refresh keeps the exact quote cache current while the chain remains open.
+
+## SPY strategy lab
+
+The strategy lab ranks research candidates rather than individual buy/sell instructions. It constructs call and put debit/credit verticals, equal-width call and put butterflies, and paper-only delta-hedged volatility candidates from the currently scanned expiration. The entire structure is evaluated at executable bid/ask prices, and the result shows net delta, gamma, vega, maximum loss, maximum profit when bounded, edge, and spread coverage. Calendar spreads and risk reversals are deferred until a synchronized multi-expiration data feed is available.
 
 ## Reading the result
 
@@ -117,7 +125,7 @@ See [SOURCES.md](SOURCES.md) for the source URLs, as-of dates, embedded fallback
 
 ## Walk-forward research engine
 
-Run the new pandas pipeline after each official daily close, then import `volatility-research-output/latest_forecasts.json` from the popup. Full formulas, schemas, leakage controls, CLI arguments, and outputs are documented in [volatility_research/README.md](volatility_research/README.md). The reproducible SPY/QQQ/SPX demonstration and out-of-sample error table are in [VOLATILITY_RESEARCH_RESULTS.md](VOLATILITY_RESEARCH_RESULTS.md).
+Run the pandas pipeline after each official daily close, then import `volatility-research-output/latest_forecasts.json` from the popup. Full formulas, schemas, leakage controls, CLI arguments, and outputs are documented in [volatility_research/README.md](volatility_research/README.md). The current extension payload is SPY-only and selects among realized-volatility baselines, variance blends, EWMA, and log-HAR by horizon using past out-of-sample variance error. The implementation plan and data gates are in [SPY_RESEARCH_PLAN.md](SPY_RESEARCH_PLAN.md).
 
 The extension keeps live Mark/IV scanning separate from the daily forecast. That distinction is important: market IV updates continuously, while a daily-return forecast should change only when a new daily close enters the model.
 

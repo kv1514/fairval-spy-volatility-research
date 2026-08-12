@@ -1,5 +1,5 @@
 const DEFAULTS = {
-  settingsVersion: 7,
+  settingsVersion: 8,
   enabled: true,
   ivSource: "surface",
   volatility: 20,
@@ -9,6 +9,7 @@ const DEFAULTS = {
   autoDividend: true,
   dividend: 1.1,
   alertsEnabled: true,
+  strategyEnabled: true,
   gapThreshold: 10,
   maxSpreadPercent: 20,
   autoScan: true,
@@ -16,6 +17,7 @@ const DEFAULTS = {
   paperRecording: true,
   treeSteps: 75,
 };
+const PAPER_STUDY_VERSION = 4;
 const IV_SOURCES = ["walkforward", "surface", "forecast", "individual", "manual"];
 
 const fields = {
@@ -28,6 +30,7 @@ const fields = {
   autoDividend: document.getElementById("autoDividend"),
   dividend: document.getElementById("dividend"),
   alertsEnabled: document.getElementById("alertsEnabled"),
+  strategyEnabled: document.getElementById("strategyEnabled"),
   gapThreshold: document.getElementById("gapThreshold"),
   maxSpreadPercent: document.getElementById("maxSpreadPercent"),
   autoScan: document.getElementById("autoScan"),
@@ -47,8 +50,11 @@ function showPaperStatus(study) {
   const status = document.getElementById("paperStatus");
   const records = study?.records?.length || 0;
   const outcome = study?.outcomes60m;
+  const hedgeCopy = outcome?.deltaHedgedCount
+    ? ` · gross delta-hedged mean ${outcome.meanDeltaHedgedPnlContract >= 0 ? "+" : ""}$${outcome.meanDeltaHedgedPnlContract.toFixed(2)}/contract`
+    : "";
   status.textContent = outcome?.count
-    ? `${records.toLocaleString()} snapshots · ${outcome.count} resolved 60m flags · ${(outcome.winRate * 100).toFixed(1)}% positive · mean ${outcome.meanPnl >= 0 ? "+" : ""}$${outcome.meanPnl.toFixed(2)}`
+    ? `${records.toLocaleString()} snapshots · ${outcome.count} resolved 60m flags · ${(outcome.winRate * 100).toFixed(1)}% positive · option mean ${outcome.meanPnl >= 0 ? "+" : ""}$${outcome.meanPnl.toFixed(2)}/share${hedgeCopy}`
     : `${records.toLocaleString()} snapshots · no 60m flag outcomes resolved yet.`;
 }
 
@@ -69,6 +75,7 @@ chrome.storage.sync.get(null, (saved) => {
   if (Number(saved.settingsVersion || 0) < DEFAULTS.settingsVersion) chrome.storage.sync.set({
     settingsVersion: DEFAULTS.settingsVersion,
     alertsEnabled: settings.alertsEnabled,
+    strategyEnabled: settings.strategyEnabled,
     gapThreshold: settings.gapThreshold,
     maxSpreadPercent: settings.maxSpreadPercent,
     autoScan: settings.autoScan,
@@ -87,6 +94,7 @@ chrome.storage.sync.get(null, (saved) => {
   fields.autoDividend.checked = settings.autoDividend;
   fields.dividend.value = settings.dividend;
   fields.alertsEnabled.checked = settings.alertsEnabled;
+  fields.strategyEnabled.checked = settings.strategyEnabled;
   fields.gapThreshold.value = settings.gapThreshold;
   fields.maxSpreadPercent.value = settings.maxSpreadPercent;
   fields.autoScan.checked = settings.autoScan;
@@ -97,7 +105,7 @@ chrome.storage.sync.get(null, (saved) => {
 });
 
 chrome.storage.local.get({
-  paperStudyV1: { version: 3, records: [] },
+  paperStudyV1: { version: PAPER_STUDY_VERSION, records: [] },
   volatilityForecastV1: { schema: "volatility_forecast.v1", records: [] },
 }, ({ paperStudyV1, volatilityForecastV1 }) => {
   showPaperStatus(paperStudyV1);
@@ -153,6 +161,7 @@ document.getElementById("apply").addEventListener("click", () => {
     autoDividend: fields.autoDividend.checked,
     dividend: Math.max(0, Number(fields.dividend.value) || 0),
     alertsEnabled: fields.alertsEnabled.checked,
+    strategyEnabled: fields.strategyEnabled.checked,
     gapThreshold: Math.min(Math.max(Number(fields.gapThreshold.value) || DEFAULTS.gapThreshold, 1), 100),
     maxSpreadPercent: Math.min(Math.max(Number(fields.maxSpreadPercent.value) || DEFAULTS.maxSpreadPercent, 1), 100),
     autoScan: fields.autoScan.checked,
@@ -173,7 +182,7 @@ document.getElementById("apply").addEventListener("click", () => {
 });
 
 document.getElementById("exportPaper").addEventListener("click", () => {
-  chrome.storage.local.get({ paperStudyV1: { version: 3, records: [] } }, ({ paperStudyV1 }) => {
+  chrome.storage.local.get({ paperStudyV1: { version: PAPER_STUDY_VERSION, records: [] } }, ({ paperStudyV1 }) => {
     const blob = new Blob([JSON.stringify(paperStudyV1, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -186,6 +195,6 @@ document.getElementById("exportPaper").addEventListener("click", () => {
 
 document.getElementById("clearPaper").addEventListener("click", () => {
   if (!confirm("Clear all locally recorded paper observations?")) return;
-  const empty = { version: 3, records: [], updatedAt: Date.now(), outcomes15m: null, outcomes60m: null };
+  const empty = { version: PAPER_STUDY_VERSION, records: [], updatedAt: Date.now(), outcomes15m: null, outcomes60m: null };
   chrome.storage.local.set({ paperStudyV1: empty }, () => showPaperStatus(empty));
 });

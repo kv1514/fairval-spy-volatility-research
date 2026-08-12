@@ -30,8 +30,9 @@ DEFAULT_HORIZONS = (1, 2, 3, 5, 10)
 FIXED_WEIGHTS = np.array([0.40, 0.30, 0.20, 0.10], dtype=float)
 MODEL_NAMES = (
     "realized_5", "realized_10", "realized_20", "realized_60",
-    "fixed_blend", "optimized_blend", "sparse_blend", "ewma",
+    "fixed_blend", "optimized_blend", "sparse_blend", "ewma", "har_rv",
 )
+HAR_WINDOWS = (1, 5, 20)
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class ForecastConfig:
     weight_zero_threshold: float = 1e-8
     projected_gradient_iterations: int = 400
     projected_gradient_tolerance: float = 1e-13
+    har_ridge_penalty: float = 1e-3
 
 
 def _validate_columns(frame: pd.DataFrame, required: Iterable[str], label: str) -> None:
@@ -270,6 +272,51 @@ def _ewma_volatility_paths(returns: np.ndarray, lambdas: np.ndarray) -> np.ndarr
     return result
 
 
+def _fit_har_variance_model(training: pd.DataFrame, config: ForecastConfig) -> dict[str, np.ndarray] | None:
+    """Fit a leakage-safe log-HAR variance forecast with a downside-return term.
+
+    The daily/weekly/monthly components follow the parsimonious HAR-RV idea. A
+    downside-return variance feature lets the model learn SPY's asymmetric
+    volatility response without forcing it. Ridge shrinkage stabilizes the
+    small rolling samples; the intercept is deliberately not penalized.
+    """
+
+    variance_columns = [np.square(training[f"vol_{window}"].to_numpy(float) / 100.0) for window in HAR_WINDOWS]
+    leverage = np.where(
+        training["log_return"].to_numpy(float) < 0,
+        np.square(training["log_return"].to_numpy(float)) * TRADING_DAYS,
+        0.0,
+    )
+    raw_x = np.column_stack([*(np.log(np.maximum(values, 1e-10)) for values in variance_columns), leverage])
+    target = np.log(np.maximum(np.square(training["target_future_vol"].to_numpy(float) / 100.0), 1e-10))
+    mask = np.isfinite(raw_x).all(axis=1) & np.isfinite(target)
+    raw_x = raw_x[mask]
+    target = target[mask]
+    if len(target) < max(config.min_train_observations, raw_x.shape[1] + 2):
+        return None
+    mean = raw_x.mean(axis=0)
+    scale = raw_x.std(axis=0)
+    scale = np.where(scale > 1e-12, scale, 1.0)
+    design = np.column_stack([np.ones(len(raw_x)), (raw_x - mean) / scale])
+    penalty = np.eye(design.shape[1]) * max(float(config.har_ridge_penalty), 0.0)
+    penalty[0, 0] = 0.0
+    coefficients = np.linalg.solve(design.T @ design + penalty, design.T @ target)
+    return {"mean": mean, "scale": scale, "coefficients": coefficients}
+
+
+def _predict_har_volatility(model: dict[str, np.ndarray] | None, row: pd.Series) -> float:
+    if model is None:
+        return float(row["fixed_blend"])
+    variance_values = [max(float(row[f"vol_{window}"]) / 100.0, 1e-5) ** 2 for window in HAR_WINDOWS]
+    log_return = float(row["log_return"])
+    leverage = log_return * log_return * TRADING_DAYS if log_return < 0 else 0.0
+    raw = np.array([*(np.log(np.maximum(variance_values, 1e-10))), leverage], dtype=float)
+    standardized = (raw - model["mean"]) / model["scale"]
+    log_variance = float(np.dot(np.append(1.0, standardized), model["coefficients"]))
+    variance = float(np.exp(np.clip(log_variance, np.log(1e-10), np.log(25.0))))
+    return float(np.sqrt(variance) * 100.0)
+
+
 def _training_rows(history: pd.DataFrame, origin_date: pd.Timestamp, config: ForecastConfig) -> pd.DataFrame:
     eligible = history[
         history["target_future_vol"].notna()
@@ -305,7 +352,7 @@ class VolatilityResearchEngine:
 
     @property
     def _all_windows(self) -> tuple[int, ...]:
-        return tuple(sorted(set(self._candidate_windows) | set(REPORT_WINDOWS)))
+        return tuple(sorted(set(self._candidate_windows) | set(REPORT_WINDOWS) | set(HAR_WINDOWS)))
 
     def _prepare_ticker(self, ticker: str, frame: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
         local = frame.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True).copy()
@@ -350,7 +397,7 @@ class VolatilityResearchEngine:
             candidate_windows = self._candidate_windows
             all_windows = self._all_windows
             for horizon in self.config.horizons:
-                panel = base[["ticker", "date", "close", *(f"vol_{window}" for window in all_windows), "fixed_blend"]].copy()
+                panel = base[["ticker", "date", "close", "log_return", *(f"vol_{window}" for window in all_windows), "fixed_blend"]].copy()
                 panel["horizon"] = int(horizon)
                 panel["target_future_vol"] = [
                     _future_realized_vol(returns, index, int(horizon)) for index in range(len(panel))
@@ -381,11 +428,15 @@ class VolatilityResearchEngine:
                 ewma_values: list[float] = []
                 ewma_lambdas: list[float] = []
                 ewma_train_end: list[pd.Timestamp | pd.NaT] = []
+                har_values: list[float] = []
+                har_train_end: list[pd.Timestamp | pd.NaT] = []
                 last_weights = _uniform_weights(len(candidate_windows))
                 last_sparse_weights = _uniform_weights(len(candidate_windows))
                 last_weight_train_end = pd.NaT
                 last_lambda = float(self.config.ewma_default_lambda)
                 last_lambda_train_end = pd.NaT
+                last_har_model: dict[str, np.ndarray] | None = None
+                last_har_train_end = pd.NaT
 
                 for position, row in panel.iterrows():
                     origin = pd.Timestamp(row["date"])
@@ -450,6 +501,13 @@ class VolatilityResearchEngine:
                     ewma_values.append(float(row["ewma_paths"][lambda_column]))
                     ewma_lambdas.append(float(last_lambda))
                     ewma_train_end.append(last_lambda_train_end)
+                    if rebalance and len(training) >= self.config.min_train_observations:
+                        fitted_har = _fit_har_variance_model(training, self.config)
+                        if fitted_har is not None:
+                            last_har_model = fitted_har
+                            last_har_train_end = pd.Timestamp(training["target_end_date"].max())
+                    har_values.append(_predict_har_volatility(last_har_model, row))
+                    har_train_end.append(last_har_train_end)
 
                 panel["optimized_blend"] = optimized_values
                 panel["optimized_weights"] = optimized_weights
@@ -460,6 +518,8 @@ class VolatilityResearchEngine:
                 panel["ewma"] = ewma_values
                 panel["ewma_lambda"] = ewma_lambdas
                 panel["ewma_train_end"] = ewma_train_end
+                panel["har_rv"] = har_values
+                panel["har_train_end"] = har_train_end
 
                 selected_models: list[str] = []
                 selected_train_end: list[pd.Timestamp | pd.NaT] = []
@@ -525,6 +585,8 @@ class VolatilityResearchEngine:
                             return row["optimized_train_end"]
                         if model == "sparse_blend":
                             return row["sparse_train_end"]
+                        if model == "har_rv":
+                            return row["har_train_end"]
                         return pd.NaT
 
                     for model in MODEL_NAMES:
@@ -599,7 +661,7 @@ def evaluate_forecasts(
 def diagnose_models_by_moneyness(
     forecasts: pd.DataFrame,
     option_history: pd.DataFrame | None = None,
-    models: Iterable[str] = ("optimized_blend", "sparse_blend", "ewma", "realized_20", "realized_60"),
+    models: Iterable[str] = ("optimized_blend", "sparse_blend", "ewma", "har_rv", "realized_20", "realized_60"),
     horizons: Iterable[int] = DEFAULT_HORIZONS,
 ) -> pd.DataFrame:
     """Compare requested models on out-of-sample variance loss by ticker/horizon/bucket."""

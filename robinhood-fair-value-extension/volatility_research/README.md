@@ -17,6 +17,7 @@ Annualized realized volatility is expressed in percent. The engine evaluates hor
 - `optimized_blend` — a **dense** variance blend fitted by projected-gradient descent over the full candidate window set, with nonnegative weights that sum to one
 - `sparse_blend` — a **sparse** variance blend built by greedy forward selection; it adds one window at a time only while training variance MSE keeps improving, is capped at `sparse_max_terms` windows (default 3), and drops any weight below `weight_zero_threshold` (`1e-8`) so unused windows carry exactly zero weight
 - `ewma`, with lambda selected from a coarse `0.70..0.99` grid and a `0.001` fine grid around the coarse winner
+- `har_rv`, a ridge-stabilized log-variance HAR model using daily, weekly, monthly, and downside-return variance components
 - `best_model`, selected by past out-of-sample variance MSE for that ticker and horizon:
 
 ```text
@@ -58,6 +59,7 @@ At a forecast origin `t`:
 - rolling-volatility inputs use returns through `t`, never after `t`;
 - a training row is eligible only when its entire target window ended on or before `t`;
 - blend weights, EWMA lambda, and model selection are fitted only on eligible completed targets;
+- HAR coefficients are fitted only on eligible completed targets and are frozen between rebalance dates;
 - parameters rebalance at the configured cadence and remain frozen between rebalances;
 - final error metrics use the forecasts already emitted at each origin, not refitted in-sample values.
 
@@ -102,7 +104,7 @@ Use `--training-window 0` for expanding rather than rolling training. The comman
 - `evaluation.csv`: MAE, RMSE, variance MSE, and directional accuracy when timestamp-aligned market IV history is supplied
 - `option_rankings.csv`: required contract DataFrame plus executable-edge and liquidity fields
 - `ewma_lambda_performance.csv`, `blend_weights_history.csv`, and `model_selection_history.csv`
-- `model_diagnostics.csv`: optimized blend, sparse blend, EWMA, realized-20, and realized-60 variance errors by ticker, horizon, and available moneyness bucket, with exactly one winner marked per group
+- `model_diagnostics.csv`: optimized blend, sparse blend, EWMA, HAR-RV, realized-20, and realized-60 variance errors by ticker, horizon, and available moneyness bucket, with exactly one winner marked per group
 - `threshold_study.csv`: forecast-reliability sweep — for each minimum `|forecast_vol - market_iv|` gap it reports observation count, coverage, directional accuracy versus market IV, and variance skill versus simply trusting market IV. It answers "does a bigger gap mean a more reliable signal?" empirically and is a research diagnostic, **not** a buy/sell threshold. It needs a historical market-IV series (`--surface-history`), so it only covers tickers with supplied option history.
 - `latest_forecasts.json`: compact `volatility_forecast.v1` bridge for the Chrome extension
 - `variance_diagnostics_report.html`: standalone diagnostics and current research queue

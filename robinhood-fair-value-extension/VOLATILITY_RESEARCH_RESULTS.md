@@ -1,6 +1,20 @@
 # Walk-forward variance research results — v1.5.0
 
-## Run completed
+## SPY-only version 2.1 update
+
+The bundled extension payload is now restricted to SPY. It uses 1,150 daily observations from January 3, 2022 through August 4, 2026, requires 252 completed targets before tuning, uses a rolling 756-target training window, and rebalances parameters every 21 forecast dates. The newest candidate model is a ridge-stabilized log-HAR variance forecast.
+
+| Horizon | Selected model | Latest forecast | Selected-model OOS variance MSE |
+| ---: | --- | ---: | ---: |
+| 1 | EWMA | 17.80% | 0.009303 |
+| 2 | EWMA | 20.14% | 0.011293 |
+| 3 | EWMA | 20.34% | 0.005581 |
+| 5 | HAR-RV | 11.66% | 0.003651 |
+| 10 | HAR-RV | 12.92% | 0.002211 |
+
+These are forecast-accuracy results, not trading returns. The August 4 payload is stale as of August 11, so version 2.1 displays fair values with a stale warning but blocks flags and strategy candidates until a newer daily-close forecast is imported.
+
+## Earlier multi-ticker benchmark
 
 The included demonstration uses 3,449 non-interpolated daily Robinhood bars:
 

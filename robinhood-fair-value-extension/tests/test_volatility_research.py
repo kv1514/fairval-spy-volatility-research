@@ -116,6 +116,16 @@ class WalkForwardTests(unittest.TestCase):
         self.assertTrue(np.all(finite >= 0.0))
         self.assertTrue(np.all(np.square(finite / 100.0) >= 0.0))
 
+    def test_har_rv_forecast_is_positive_and_past_trained(self) -> None:
+        har = self.forecasts[self.forecasts["model"] == "har_rv"]
+        self.assertGreater(len(har), 0)
+        self.assertTrue((har["forecast_vol"] > 0).all())
+        trained = har.dropna(subset=["parameter_train_end"])
+        self.assertGreater(len(trained), 0)
+        self.assertTrue(
+            (pd.to_datetime(trained["parameter_train_end"]) <= pd.to_datetime(trained["date"])).all()
+        )
+
     def test_target_dates_are_strictly_future(self) -> None:
         completed = self.forecasts.dropna(subset=["future_realized_vol"]).copy()
         self.assertTrue((pd.to_datetime(completed["target_start_date"]) > pd.to_datetime(completed["date"])).all())
@@ -315,7 +325,7 @@ class SurfaceAndDiagnosticsTests(unittest.TestCase):
         diagnostics = diagnose_models_by_moneyness(forecasts, history)
         self.assertEqual(
             set(diagnostics["model"]),
-            {"optimized_blend", "sparse_blend", "ewma", "realized_20", "realized_60"},
+            {"optimized_blend", "sparse_blend", "ewma", "har_rv", "realized_20", "realized_60"},
         )
         winners = diagnostics[diagnostics["is_best"]]
         self.assertEqual(

@@ -1,18 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "FairVal Multi-Model Option Research",
-  "version": "2.0.1",
-  "description": "Compares forecast-volatility values under European Black-Scholes and American tree models with explicit diagnostics.",
+  "name": "FairVal SPY Volatility Research",
+  "version": "2.1.0",
+  "description": "SPY volatility research with live fair values, executable multi-leg structures, and delta-hedged paper diagnostics.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://home.treasury.gov/*"],
   "action": {
-    "default_title": "FairVal Multi-Model Research",
+    "default_title": "FairVal SPY Research",
     "default_popup": "popup.html"
   },
   "content_scripts": [
     {
       "matches": ["https://robinhood.com/*"],
-      "js": ["pricing-core.js", "content.js"],
+      "js": ["pricing-core.js", "strategy-core.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
     }

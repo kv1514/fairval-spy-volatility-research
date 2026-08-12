@@ -28,6 +28,7 @@ const core = context.__BSFV_CORE__;
 const pricing = context.FairValPricing;
 
 test("bundles a valid walk-forward forecast bridge for Robinhood", () => {
+  assert.deepEqual(manifest.content_scripts[0].js, ["pricing-core.js", "strategy-core.js", "content.js"]);
   const exposedResources = manifest.web_accessible_resources
     ?.flatMap((entry) => entry.resources || []) || [];
   assert.ok(exposedResources.includes("volatility-research-output/latest_forecasts.json"));
@@ -35,7 +36,7 @@ test("bundles a valid walk-forward forecast bridge for Robinhood", () => {
   assert.ok(bundledForecast.records.length > 0);
   assert.deepEqual(
     [...new Set(bundledForecast.records.map((record) => record.ticker))].sort(),
-    ["QQQ", "SPX", "SPY"],
+    ["SPY"],
   );
   assert.ok(bundledForecast.records.every((record) =>
     Number.isFinite(Number(record.horizon)) && Number.isFinite(Number(record.forecast_vol))
@@ -137,6 +138,13 @@ test("selects the nearest leakage-safe walk-forward horizon", () => {
   assert.equal(core.forecastHorizonFromDte(7.2), 7);
 });
 
+test("disables research flags when a daily forecast is stale", () => {
+  const record = { asOfDate: "2026-08-04" };
+  assert.equal(core.isForecastFresh(record, Date.parse("2026-08-07T20:00:00Z"), 4), true);
+  assert.equal(core.isForecastFresh(record, Date.parse("2026-08-11T20:00:00Z"), 4), false);
+  assert.ok(core.forecastAgeDays(record, Date.parse("2026-08-11T20:00:00Z")) > 6.9);
+});
+
 test("matches historical IV context by ticker, option type, DTE, and moneyness", () => {
   const payload = {
     surface_benchmarks: [
@@ -213,6 +221,13 @@ test("parses the visible Robinhood option-chain fields", () => {
   assert.equal(core.parseHeading("A1BC sell Put").ticker, "A1BC");
   assert.equal(core.parseMoney("$1.50"), 1.5);
   assert.equal(core.parseMoney("—"), null);
+  const currentPriceCell = { id: "current-price-cell" };
+  assert.equal(core.optionPriceCell({
+    querySelector(selector) {
+      assert.match(selector, /OptionChainExpiringSoonCell/);
+      return currentPriceCell;
+    },
+  }), currentPriceCell);
   assert.equal(core.extractSelectedIv("Implied volatility18.22%Open interest566"), 18.22);
   assert.equal(
     core.parseExpirationLabel("Expiring August 5 (1d)", new Date("2026-08-04T20:00:00Z")),
@@ -393,6 +408,33 @@ test("scores forward paper outcomes at executable bid and ask prices", () => {
   assert.equal(outcome.count, 2);
   assert.equal(outcome.wins, 2);
   assert.ok(Math.abs(outcome.meanPnl - 0.19) < 1e-12);
+});
+
+test("attributes gross delta-hedged paper PnL separately from option PnL", () => {
+  const start = Date.parse("2026-08-04T17:00:00Z");
+  const records = [
+    {
+      contractKey: "SPY|call|2026-08-07|775",
+      observedAt: start,
+      bid: 1,
+      ask: 1.05,
+      spot: 100,
+      marketDelta: 0.5,
+      flagDirection: "below-model",
+    },
+    {
+      contractKey: "SPY|call|2026-08-07|775",
+      observedAt: start + 60 * 60_000,
+      bid: 1.25,
+      ask: 1.3,
+      spot: 101,
+    },
+  ];
+  const outcome = core.computePaperOutcomes(records, 60);
+  assert.equal(outcome.deltaHedgedCount, 1);
+  assert.ok(Math.abs(outcome.meanOptionPnlContract - 20) < 1e-12);
+  assert.ok(Math.abs(outcome.meanHedgePnlContract + 50) < 1e-12);
+  assert.ok(Math.abs(outcome.meanDeltaHedgedPnlContract + 30) < 1e-12);
 });
 
 test("thins DOM redraw snapshots without dropping later quote samples", () => {

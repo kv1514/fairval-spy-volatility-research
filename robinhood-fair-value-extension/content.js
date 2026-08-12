@@ -2,6 +2,7 @@
   "use strict";
 
   const Pricing = globalThis.FairValPricing || null;
+  const Strategies = globalThis.FairValStrategies || null;
 
   const DIVIDEND_DEFAULTS = { SPY: 1.11, SPX: 1.12, QQQ: 0.44 };
   const FALLBACK_TREASURY_CURVE = {
@@ -19,7 +20,7 @@
   };
   const IV_SOURCES = ["walkforward", "surface", "forecast", "individual", "manual"];
   const DEFAULT_SETTINGS = {
-    settingsVersion: 7,
+    settingsVersion: 8,
     enabled: true,
     ivSource: "surface",
     volatility: 20,
@@ -34,10 +35,11 @@
     autoScan: true,
     autoScanIntervalSeconds: 30,
     paperRecording: true,
+    strategyEnabled: true,
     treeSteps: 75,
     collapsed: false,
   };
-  const PAPER_STUDY_VERSION = 3;
+  const PAPER_STUDY_VERSION = 4;
   const PAPER_MIN_SPACING_MS = 15_000;
 
   const normalPdf = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
@@ -290,18 +292,49 @@
         const exit = signal.flagDirection === "below-model" ? Number(outcome.bid) : Number(outcome.ask);
         if (![entry, exit].every(Number.isFinite) || entry <= 0 || exit < 0) continue;
         const pnl = signal.flagDirection === "below-model" ? exit - entry : entry - exit;
-        outcomes.push({ pnl, direction: signal.flagDirection });
+        const positionSign = signal.flagDirection === "below-model" ? 1 : -1;
+        const optionPnlContract = pnl * 100;
+        const delta = Number(signal.marketDelta);
+        const entrySpot = Number(signal.spot);
+        const exitSpot = Number(outcome.spot);
+        const hedgeShares = [delta, entrySpot, exitSpot].every(Number.isFinite)
+          ? -positionSign * delta * 100
+          : null;
+        const hedgePnlContract = Number.isFinite(hedgeShares)
+          ? hedgeShares * (exitSpot - entrySpot)
+          : null;
+        const deltaHedgedPnlContract = Number.isFinite(hedgePnlContract)
+          ? optionPnlContract + hedgePnlContract
+          : null;
+        outcomes.push({
+          pnl,
+          direction: signal.flagDirection,
+          optionPnlContract,
+          hedgePnlContract,
+          deltaHedgedPnlContract,
+        });
       }
     }
     const mean = outcomes.length
       ? outcomes.reduce((total, outcome) => total + outcome.pnl, 0) / outcomes.length
       : null;
+    const deltaHedged = outcomes.filter((outcome) => Number.isFinite(outcome.deltaHedgedPnlContract));
     return {
       horizonMinutes: Number(horizonMinutes),
       count: outcomes.length,
       wins: outcomes.filter((outcome) => outcome.pnl > 0).length,
       winRate: outcomes.length ? outcomes.filter((outcome) => outcome.pnl > 0).length / outcomes.length : null,
       meanPnl: mean,
+      deltaHedgedCount: deltaHedged.length,
+      meanOptionPnlContract: deltaHedged.length
+        ? deltaHedged.reduce((total, outcome) => total + outcome.optionPnlContract, 0) / deltaHedged.length
+        : null,
+      meanHedgePnlContract: deltaHedged.length
+        ? deltaHedged.reduce((total, outcome) => total + outcome.hedgePnlContract, 0) / deltaHedged.length
+        : null,
+      meanDeltaHedgedPnlContract: deltaHedged.length
+        ? deltaHedged.reduce((total, outcome) => total + outcome.deltaHedgedPnlContract, 0) / deltaHedged.length
+        : null,
     };
   }
 
@@ -702,6 +735,17 @@
     return Math.max(1, Math.round(Number(days)));
   }
 
+  function forecastAgeDays(record, now = Date.now()) {
+    if (!record?.asOfDate) return Number.POSITIVE_INFINITY;
+    const timestamp = Date.parse(`${record.asOfDate}T21:00:00Z`);
+    if (!Number.isFinite(timestamp)) return Number.POSITIVE_INFINITY;
+    return Math.max((Number(now) - timestamp) / 86_400_000, 0);
+  }
+
+  function isForecastFresh(record, now = Date.now(), maximumAgeDays = 4) {
+    return forecastAgeDays(record, now) <= Number(maximumAgeDays);
+  }
+
   function selectVolatilityForecast(payload, ticker, requestedHorizon) {
     if (payload?.schema !== "volatility_forecast.v1" || !Array.isArray(payload.records)) return null;
     const normalizedTicker = String(ticker || "").toUpperCase() === "SPXW"
@@ -862,6 +906,12 @@
     return copy.textContent || "";
   }
 
+  function optionPriceCell(row) {
+    return row?.querySelector(
+      '[data-testid="OptionChainValidPriceCell"], [data-testid="OptionChainExpiringSoonCell"]',
+    ) || null;
+  }
+
   const Core = {
     calculateBlackScholes,
     computePaperOutcomes,
@@ -891,6 +941,9 @@
     varianceResearchContext,
     thinPaperRecords,
     forecastHorizonFromDte,
+    forecastAgeDays,
+    isForecastFresh,
+    optionPriceCell,
   };
 
   globalThis.__BSFV_CORE__ = Core;
@@ -1072,7 +1125,7 @@
     const strikes = initialRows
       .map((row) => ({
         strike: parseMoney(row.querySelector('[data-testid="OptionChainStrikePriceCell"]')?.textContent || ""),
-        price: parseMoney(textWithoutOverlay(row.querySelector('[data-testid="OptionChainValidPriceCell"]'))),
+        price: parseMoney(textWithoutOverlay(optionPriceCell(row))),
       }))
       .filter((contract) => Number.isFinite(contract.strike) && Number.isFinite(contract.price))
       .map((contract) => contract.strike);
@@ -1169,6 +1222,7 @@
         <label class="bsfv-check"><input id="bsfv-auto-rate" type="checkbox"> Auto Treasury curve by expiration</label>
         <label class="bsfv-check"><input id="bsfv-auto-dividend" type="checkbox"> Auto ticker dividends by expiration</label>
         <label class="bsfv-check"><input id="bsfv-alerts-enabled" type="checkbox"> Highlight high-confidence research flags</label>
+        <label class="bsfv-check"><input id="bsfv-strategy-enabled" type="checkbox"> Rank SPY defined-risk and delta-hedged research structures</label>
         <label class="bsfv-check"><input id="bsfv-auto-scan" type="checkbox"> Continuously refresh exact Mark/IV every <input id="bsfv-auto-scan-seconds" type="number" min="15" max="300" step="5"> seconds</label>
         <label class="bsfv-check"><input id="bsfv-paper-recording" type="checkbox"> Record forward paper outcomes locally</label>
         <button id="bsfv-scan-exact" type="button">REFRESH MARK IV NOW</button>
@@ -1177,6 +1231,11 @@
           <div><strong>RESEARCH FLAGS</strong><span id="bsfv-alert-count">0</span></div>
           <ol id="bsfv-alert-list"></ol>
           <p id="bsfv-alert-note">Exact Mark IVs refresh automatically while this chain stays open.</p>
+        </section>
+        <section id="bsfv-strategies" aria-label="SPY option strategy research candidates">
+          <div><strong>SPY STRATEGY LAB</strong><span id="bsfv-strategy-count">0</span></div>
+          <ol id="bsfv-strategy-list"></ol>
+          <p id="bsfv-strategy-note">Defined-risk structures appear only after fresh executable quotes clear every gate.</p>
         </section>
         <p class="bsfv-disclaimer">Research screen only · no orders · local paper recorder</p>
       </div>`;
@@ -1226,6 +1285,11 @@
       chrome.storage.sync.set({ alertsEnabled: settings.alertsEnabled });
       scheduleRender();
     });
+    panel.querySelector("#bsfv-strategy-enabled").addEventListener("change", (event) => {
+      settings.strategyEnabled = event.target.checked;
+      chrome.storage.sync.set({ strategyEnabled: settings.strategyEnabled });
+      scheduleRender();
+    });
     panel.querySelector("#bsfv-auto-scan").addEventListener("change", (event) => {
       settings.autoScan = event.target.checked;
       lastAutoScanAt = 0;
@@ -1249,7 +1313,7 @@
 
   function syncPanel(context = pageContext(), details = {}) {
     const panel = ensurePanel();
-    panel.dataset.bsfvBuild = "2.0.1";
+    panel.dataset.bsfvBuild = "2.1.0";
     panel.dataset.bsfvForecastRecords = String(volatilityForecast?.records?.length || 0);
     panel.classList.toggle("is-collapsed", settings.collapsed);
     panel.querySelector("#bsfv-panel-body").hidden = settings.collapsed;
@@ -1265,6 +1329,7 @@
     panel.querySelector("#bsfv-auto-rate").checked = settings.autoRate;
     panel.querySelector("#bsfv-auto-dividend").checked = settings.autoDividend;
     panel.querySelector("#bsfv-alerts-enabled").checked = settings.alertsEnabled;
+    panel.querySelector("#bsfv-strategy-enabled").checked = settings.strategyEnabled;
     panel.querySelector("#bsfv-auto-scan").checked = settings.autoScan;
     panel.querySelector("#bsfv-auto-scan-seconds").value = String(settings.autoScanIntervalSeconds);
     panel.querySelector("#bsfv-auto-scan-seconds").disabled = !settings.autoScan;
@@ -1288,6 +1353,9 @@
       panel.querySelector("#bsfv-alert-count").textContent = "0";
       panel.querySelector("#bsfv-alert-list").replaceChildren();
       panel.querySelector("#bsfv-alert-note").textContent = "Open a chain; exact Mark IVs will refresh automatically.";
+      panel.querySelector("#bsfv-strategy-count").textContent = "0";
+      panel.querySelector("#bsfv-strategy-list").replaceChildren();
+      panel.querySelector("#bsfv-strategy-note").textContent = "Open a SPY chain to begin strategy research.";
       return;
     }
     const spotCopy = context.basis === "regular-session close"
@@ -1313,13 +1381,20 @@
     const dividendCopy = settings.autoDividend
       ? `q ${Number(details.dividend).toFixed(2)}% · ${details.dividendModel || "ticker default"}`
       : `q ${Number(settings.dividend).toFixed(2)}% manual`;
+    const refreshInterval = Math.max(Number(settings.autoScanIntervalSeconds) || 30, 15);
+    const nextRefresh = lastAutoScanAt > 0
+      ? Math.max(Math.ceil(refreshInterval - (Date.now() - lastAutoScanAt) / 1000), 0)
+      : 0;
     const autoCopy = settings.autoScan
-      ? `auto ${Math.max(Number(settings.autoScanIntervalSeconds) || 30, 15)}s`
+      ? `live FV 1s / exact IV ${refreshInterval}s / next ${nextRefresh}s`
       : "auto off";
     const paperCopy = settings.paperRecording
       ? `paper ${paperStudy.records?.length || 0} · 60m ${paperStudy.outcomes60m?.count || 0}`
       : "paper off";
-    statusLine.textContent = `${ivCopy} · ${exactCopy} · ${historyCopy} · ${autoCopy} · ${paperCopy} · shift ${Number(settings.ivShift).toFixed(2)}pt · ${rateCopy} · ${dividendCopy}`;
+    const freshnessCopy = settings.ivSource === "walkforward" && details.forecastRecord
+      ? details.forecastFresh ? "forecast current" : `forecast stale ${Number(details.forecastAgeDays).toFixed(1)}d`
+      : null;
+    statusLine.textContent = `${ivCopy} · ${freshnessCopy ? `${freshnessCopy} · ` : ""}${exactCopy} · ${historyCopy} · ${autoCopy} · ${paperCopy} · shift ${Number(settings.ivShift).toFixed(2)}pt · ${rateCopy} · ${dividendCopy}`;
 
     const alerts = details.alerts || [];
     const alertList = panel.querySelector("#bsfv-alert-list");
@@ -1341,13 +1416,42 @@
     } else if ((details.exactCount ?? 0) < 3) {
       alertNote.textContent = "Waiting for the automatic exact Mark/IV refresh; estimates cannot trigger flags.";
     } else if (details.alertInputReady === false) {
-      alertNote.textContent = ["surface", "individual"].includes(settings.ivSource)
+      alertNote.textContent = settings.ivSource === "walkforward" && details.forecastFresh === false
+        ? "Walk-forward forecast is stale; flags stay disabled until the daily SPY forecast is refreshed."
+        : ["surface", "individual"].includes(settings.ivSource)
         ? "Research flags require your own walk-forward, forecast, or manual volatility view."
         : "Carry or the walk-forward forecast is not calibrated for this ticker/expiry.";
     } else if ((details.surfaceContextCount ?? 0) === 0) {
       alertNote.textContent = "No matched historical ticker/DTE/moneyness IV bucket; skew-safe flags are suppressed.";
     } else {
       alertNote.textContent = "No fresh contract clears the edge, spread, and liquidity gates.";
+    }
+
+    const strategies = details.strategyStudy?.candidates || [];
+    const strategyList = panel.querySelector("#bsfv-strategy-list");
+    const strategyNote = panel.querySelector("#bsfv-strategy-note");
+    panel.querySelector("#bsfv-strategy-count").textContent = String(strategies.length);
+    strategyList.replaceChildren();
+    for (const strategy of strategies.slice(0, 6)) {
+      const item = document.createElement("li");
+      const risk = Number.isFinite(strategy.maxLossContract)
+        ? `risk ${formatMoney(strategy.maxLossContract)}`
+        : "risk unbounded / paper only";
+      const entry = `${strategy.entryType} ${formatMoney(Math.abs(strategy.marketCost) * 100)}`;
+      item.textContent = `${strategy.label} ${strategy.legText} · edge ${formatMoney(strategy.edge * 100)} · ${entry} · ${risk} · ${strategy.spreadCoverage.toFixed(1)}x friction`;
+      item.title = `${strategy.thesis} Net delta ${strategy.netDelta.toFixed(3)}; paper stock hedge ${strategy.hedgeSharesPerContract.toFixed(1)} shares per option contract. Candidate for research, not an order.`;
+      strategyList.appendChild(item);
+    }
+    if (!settings.strategyEnabled) {
+      strategyNote.textContent = "SPY strategy research is turned off.";
+    } else if (context.ticker !== "SPY") {
+      strategyNote.textContent = "Strategy ranking is deliberately limited to SPY for this research phase.";
+    } else if (details.alertInputReady === false) {
+      strategyNote.textContent = "A current independent SPY volatility forecast is required before structures are ranked.";
+    } else if (strategies.length) {
+      strategyNote.textContent = "Ranked at executable bid/ask. Delta-hedged singles are paper-only; verticals and butterflies are defined-risk research candidates.";
+    } else {
+      strategyNote.textContent = details.strategyStudy?.diagnostics?.noCandidateReason || "No SPY structure clears the quote, history, spread, and edge gates.";
     }
   }
 
@@ -1400,6 +1504,9 @@
         marketIv: contract.marketIv,
         fairIv: contract.fairIv,
         ivEdge: contract.ivEdge,
+        marketDelta: context.optionType === "put"
+          ? contract.marketGreeks?.putDelta ?? null
+          : contract.marketGreeks?.callDelta ?? null,
         impliedVariance: contract.variance.impliedVariance,
         forecastVariance: contract.variance.forecastVariance,
         varianceEdge: contract.variance.varianceEdge,
@@ -1491,14 +1598,16 @@
     const forecastRecord = settings.ivSource === "walkforward"
       ? selectVolatilityForecast(volatilityForecast, context.ticker, forecastHorizonFromDte(days))
       : null;
+    const forecastAge = forecastRecord ? forecastAgeDays(forecastRecord) : Number.POSITIVE_INFINITY;
+    const forecastFresh = settings.ivSource !== "walkforward" || isForecastFresh(forecastRecord);
     const hasOwnVolatilityView = ["walkforward", "forecast", "manual"].includes(settings.ivSource);
     const alertInputReady = hasOwnVolatilityView && (!settings.autoDividend || Boolean(inferredCarry) ||
       Object.prototype.hasOwnProperty.call(DIVIDEND_DEFAULTS, context.ticker)) &&
-      (settings.ivSource !== "walkforward" || Boolean(forecastRecord));
+      (settings.ivSource !== "walkforward" || Boolean(forecastRecord)) && forecastFresh;
     const rows = [...context.grid.querySelectorAll('[data-testid^="ChainTableRow-"]')];
     const contracts = rows.map((row) => {
       const strikeCell = row.querySelector('[data-testid="OptionChainStrikePriceCell"]');
-      const priceCell = row.querySelector('[data-testid="OptionChainValidPriceCell"]');
+      const priceCell = optionPriceCell(row);
       const strike = parseMoney(strikeCell?.textContent || "");
       const displayedPrice = parseMoney(textWithoutOverlay(priceCell));
       if (!priceCell || strike == null || displayedPrice == null || days == null) {
@@ -1524,7 +1633,7 @@
       .map((contract) => ({ strike: contract.strike, iv: contract.marketIv }));
     const marketSurfaceAtm = smoothedVolatility(context.spot, observations, context.spot);
     const pricedContracts = contracts.map((contract) => {
-      const { row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv } = contract;
+      const { row, priceCell, strike, referencePrice, exactQuote, marketIv } = contract;
       const surfaceIv = smoothedVolatility(strike, observations, context.spot);
       const ownForecastVol = settings.ivSource === "walkforward"
         ? forecastRecord?.forecastVol
@@ -1643,6 +1752,26 @@
         gammaWeightedEdge: contract.variance.gammaWeightedEdge,
       }))
       .sort((a, b) => b.score - a.score);
+    const strategyStudy = settings.strategyEnabled && alertInputReady && Strategies
+      ? Strategies.buildSpyStrategyStudy(pricedContracts, {
+          ticker: context.ticker,
+          optionType: context.optionType,
+          expiration: context.expiration,
+          spot: context.spot,
+          maxSpreadPercent: settings.maxSpreadPercent,
+          minimumEdgePercent: settings.gapThreshold,
+          maxCandidates: 8,
+        })
+      : {
+          candidates: [],
+          diagnostics: {
+            noCandidateReason: !Strategies
+              ? "Strategy module unavailable. Reload the extension."
+              : !alertInputReady
+                ? "A current independent volatility forecast is required."
+                : "SPY strategy research is turned off.",
+          },
+        };
     queuePaperSnapshots(context, pricedContracts, {
       rate: effectiveRate,
       dividend: effectiveDividend,
@@ -1660,11 +1789,14 @@
       alertInputReady,
       alerts,
       forecastRecord,
+      forecastAgeDays: forecastAge,
+      forecastFresh,
+      strategyStudy,
     });
 
     for (const contract of pricedContracts) {
       const {
-        row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv,
+        priceCell, displayedPrice, referencePrice, exactQuote, marketIv,
         fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark, pricing, marketGreeks,
       } = contract;
       let badge = priceCell.querySelector("[data-bsfv-overlay]");
@@ -1695,7 +1827,8 @@
       const modelLabel = pricing?.modelUsed === "binomial_american_crr"
         ? "CRR"
         : pricing?.style === "european" ? "BS-EU" : "BS-q";
-      const nextText = `FV ${formatMoney(fairValue)} · ${modelLabel} · ${marketIvCopy}${ivEdgeCopy}${varianceEdgeCopy}${percentileCopy}${flagCopy}`;
+      const forecastStatusCopy = settings.ivSource === "walkforward" && !forecastFresh ? " · STALE FCST" : "";
+      const nextText = `FV ${formatMoney(fairValue)} · ${modelLabel} · ${marketIvCopy}${ivEdgeCopy}${varianceEdgeCopy}${percentileCopy}${forecastStatusCopy}${flagCopy}`;
       if (badge.textContent !== nextText) badge.textContent = nextText;
       const comparison = difference >= 0 ? `+${formatMoney(difference)}` : `-${formatMoney(Math.abs(difference))}`;
       badge.dataset.signal = Math.abs(difference) < 0.005 ? "flat" : difference > 0 ? "above" : "below";
@@ -1783,6 +1916,7 @@
       if (needsMigration) chrome.storage.sync.set({
         settingsVersion: settings.settingsVersion,
         alertsEnabled: settings.alertsEnabled,
+        strategyEnabled: settings.strategyEnabled,
         gapThreshold: settings.gapThreshold,
         maxSpreadPercent: settings.maxSpreadPercent,
         autoScan: settings.autoScan,

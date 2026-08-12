@@ -1,6 +1,6 @@
 {
   "schema": "volatility_forecast.v1",
-  "generated_at": "2026-08-10T17:32:02.751198+00:00",
+  "generated_at": "2026-08-11T21:29:49.131185+00:00",
   "volatility_unit": "annualized_percent",
   "variance_unit": "annualized_decimal_squared",
   "horizons": [
@@ -14,18 +14,9 @@
     {
       "ticker": "SPY",
       "as_of_date": "2026-08-04",
-      "horizon": 3,
-      "forecast_vol": 14.254062919633084,
-      "model_used": "realized_60",
-      "lambda_used": null,
-      "weights_used": null
-    },
-    {
-      "ticker": "SPY",
-      "as_of_date": "2026-08-04",
-      "horizon": 2,
-      "forecast_vol": 14.254062919633084,
-      "model_used": "realized_60",
+      "horizon": 5,
+      "forecast_vol": 11.66128237590206,
+      "model_used": "har_rv",
       "lambda_used": null,
       "weights_used": null
     },
@@ -33,126 +24,35 @@
       "ticker": "SPY",
       "as_of_date": "2026-08-04",
       "horizon": 1,
-      "forecast_vol": 14.254062919633084,
-      "model_used": "realized_60",
-      "lambda_used": null,
-      "weights_used": null
-    },
-    {
-      "ticker": "QQQ",
-      "as_of_date": "2026-08-04",
-      "horizon": 5,
-      "forecast_vol": 27.743589488266572,
+      "forecast_vol": 17.798543133895006,
       "model_used": "ewma",
-      "lambda_used": 0.95,
+      "lambda_used": 0.879,
       "weights_used": null
-    },
-    {
-      "ticker": "SPX",
-      "as_of_date": "2026-08-04",
-      "horizon": 10,
-      "forecast_vol": 14.069183811423533,
-      "model_used": "realized_60",
-      "lambda_used": null,
-      "weights_used": null
-    },
-    {
-      "ticker": "SPX",
-      "as_of_date": "2026-08-04",
-      "horizon": 5,
-      "forecast_vol": 14.069183811423533,
-      "model_used": "realized_60",
-      "lambda_used": null,
-      "weights_used": null
-    },
-    {
-      "ticker": "SPX",
-      "as_of_date": "2026-08-04",
-      "horizon": 3,
-      "forecast_vol": 14.069183811423533,
-      "model_used": "realized_60",
-      "lambda_used": null,
-      "weights_used": null
-    },
-    {
-      "ticker": "SPX",
-      "as_of_date": "2026-08-04",
-      "horizon": 2,
-      "forecast_vol": 14.069183811423533,
-      "model_used": "realized_60",
-      "lambda_used": null,
-      "weights_used": null
-    },
-    {
-      "ticker": "SPX",
-      "as_of_date": "2026-08-04",
-      "horizon": 1,
-      "forecast_vol": 14.069183811423533,
-      "model_used": "realized_60",
-      "lambda_used": null,
-      "weights_used": null
-    },
-    {
-      "ticker": "QQQ",
-      "as_of_date": "2026-08-04",
-      "horizon": 1,
-      "forecast_vol": 26.767246314489036,
-      "model_used": "realized_60",
-      "lambda_used": null,
-      "weights_used": null
-    },
-    {
-      "ticker": "QQQ",
-      "as_of_date": "2026-08-04",
-      "horizon": 2,
-      "forecast_vol": 25.988509805977106,
-      "model_used": "optimized_blend",
-      "lambda_used": null,
-      "weights_used": {
-        "3": 0.25613991871022546,
-        "7": 0.07436960273985503,
-        "20": 0.1163589858764439,
-        "60": 0.5531314926734757
-      }
     },
     {
       "ticker": "SPY",
       "as_of_date": "2026-08-04",
-      "horizon": 5,
-      "forecast_vol": 14.254062919633084,
-      "model_used": "realized_60",
-      "lambda_used": null,
+      "horizon": 2,
+      "forecast_vol": 20.136994466358146,
+      "model_used": "ewma",
+      "lambda_used": 0.8,
       "weights_used": null
     },
     {
-      "ticker": "QQQ",
+      "ticker": "SPY",
       "as_of_date": "2026-08-04",
       "horizon": 3,
-      "forecast_vol": 31.677699769156426,
-      "model_used": "fixed_blend",
-      "lambda_used": null,
-      "weights_used": {
-        "5": 0.4,
-        "10": 0.3,
-        "20": 0.2,
-        "60": 0.1
-      }
-    },
-    {
-      "ticker": "QQQ",
-      "as_of_date": "2026-08-04",
-      "horizon": 10,
-      "forecast_vol": 26.767246314489036,
-      "model_used": "realized_60",
-      "lambda_used": null,
+      "forecast_vol": 20.33504712725346,
+      "model_used": "ewma",
+      "lambda_used": 0.792,
       "weights_used": null
     },
     {
       "ticker": "SPY",
       "as_of_date": "2026-08-04",
       "horizon": 10,
-      "forecast_vol": 14.254062919633084,
-      "model_used": "realized_60",
+      "forecast_vol": 12.918733391418014,
+      "model_used": "har_rv",
       "lambda_used": null,
       "weights_used": null
     }
