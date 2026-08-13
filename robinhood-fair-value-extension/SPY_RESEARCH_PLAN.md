@@ -1,4 +1,4 @@
-# FairVal SPY research plan — version 2.1
+# FairVal SPY research plan — version 2.2
 
 ## Mandate
 
@@ -49,8 +49,12 @@ The walk-forward selector now includes:
 - fixed, optimized, and sparse variance blends;
 - coarse-to-fine EWMA;
 - a ridge-stabilized log-HAR variance model using daily, weekly, monthly, and downside-return components.
+- variance-targeted GARCH(1,1) and asymmetric GJR-GARCH, fit only to returns available at each origin;
+- a simple variance ensemble and a shrunk convex forecast regression trained only on earlier completed out-of-sample targets.
 
-Every candidate model is trained only on targets whose realized window finished before the forecast origin. Model selection minimizes historical out-of-sample variance error. On the currently bundled SPY daily sample, HAR has the lowest full-sample variance error at 5- and 10-day horizons, while EWMA is strongest at 1–3 days. The live payload therefore keeps horizon-specific walk-forward selection instead of declaring one global winner.
+Every target-trained model is trained only on targets whose realized window finished before the forecast origin. GARCH-family parameters use return history through the origin and never read a later return. Model selection minimizes historical out-of-sample variance error. On the currently bundled SPY daily sample, GJR-GARCH reduces full-period variance MSE at horizons 1, 2, 3, and 5 versus the prior winners; GJR is also narrowly best at 10 days on variance MSE, while HAR retains the lower 10-day volatility MAE. The live payload therefore keeps horizon-specific rolling selection instead of declaring one global winner.
+
+Forecast evaluation additionally reports QLIKE, variance bias, and Mincer-Zarnowitz calibration. These are diagnostics, not extra knobs optimized on the evaluation period.
 
 HAR-RV background: Fulvio Corsi, “A Simple Approximate Long-Memory Model of Realized Volatility,” *Journal of Financial Econometrics* 7(2), 2009: https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1365738
 

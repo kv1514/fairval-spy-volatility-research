@@ -46,11 +46,16 @@
   const normalPdf = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 
   function validate(input) {
+    const rawDividends = Array.isArray(input.discreteDividends) ? input.discreteDividends : [];
     const clean = {
       spot: Number(input.spot), strike: Number(input.strike), days: Number(input.days),
       volatility: Number(input.volatility), rate: Number(input.rate || 0), dividend: Number(input.dividend || 0),
       optionType: String(input.optionType || "call").toLowerCase(),
       exerciseStyle: String(input.exerciseStyle || "european").toLowerCase(),
+      discreteDividends: rawDividends
+        .map((item) => ({ days: Number(item?.days), amount: Number(item?.amount) }))
+        .filter((item) => Number.isFinite(item.days) && Number.isFinite(item.amount) && item.days > 0 && item.amount > 0)
+        .sort((left, right) => left.days - right.days),
     };
     if (![clean.spot, clean.strike, clean.days, clean.volatility, clean.rate, clean.dividend].every(Number.isFinite)) {
       throw new Error("pricing inputs must be finite");
@@ -60,6 +65,17 @@
     }
     if (!["call", "put"].includes(clean.optionType)) throw new Error("optionType must be call or put");
     return clean;
+  }
+
+  function cashDividendsBeforeExpiry(input) {
+    return (input.discreteDividends || []).filter((item) => item.days <= input.days + 1e-12);
+  }
+
+  function presentValueOfCashDividends(input, elapsedYears = 0) {
+    const r = input.rate / 100;
+    return cashDividendsBeforeExpiry(input)
+      .filter((item) => item.days / 365 > elapsedYears + 1e-12)
+      .reduce((total, item) => total + item.amount * Math.exp(-r * (item.days / 365 - elapsedYears)), 0);
   }
 
   function intrinsic(input, spot = Number(input.spot)) {
@@ -74,29 +90,34 @@
     const sigma = x.volatility / 100;
     const r = x.rate / 100;
     const q = dividendAdjusted ? x.dividend / 100 : 0;
+    const cashDividendPv = presentValueOfCashDividends(x);
+    const pricingSpot = x.spot - cashDividendPv;
+    if (pricingSpot <= 0) throw new Error("cash-dividend present value must be below spot");
     const sqrtT = Math.sqrt(T);
     const discountR = Math.exp(-r * T);
     const discountQ = Math.exp(-q * T);
-    const d1 = (Math.log(x.spot / x.strike) + (r - q + sigma * sigma / 2) * T) / (sigma * sqrtT);
+    const d1 = (Math.log(pricingSpot / x.strike) + (r - q + sigma * sigma / 2) * T) / (sigma * sqrtT);
     const d2 = d1 - sigma * sqrtT;
-    const call = Math.max(x.spot * discountQ * normalCdf(d1) - x.strike * discountR * normalCdf(d2), 0);
-    const put = Math.max(x.strike * discountR * normalCdf(-d2) - x.spot * discountQ * normalCdf(-d1), 0);
+    const call = Math.max(pricingSpot * discountQ * normalCdf(d1) - x.strike * discountR * normalCdf(d2), 0);
+    const put = Math.max(x.strike * discountR * normalCdf(-d2) - pricingSpot * discountQ * normalCdf(-d1), 0);
     const density = normalPdf(d1);
-    const thetaCommon = -(x.spot * discountQ * density * sigma) / (2 * sqrtT);
+    const thetaCommon = -(pricingSpot * discountQ * density * sigma) / (2 * sqrtT);
     return {
       price: x.optionType === "put" ? put : call,
       call,
       put,
       delta: x.optionType === "put" ? -discountQ * normalCdf(-d1) : discountQ * normalCdf(d1),
-      gamma: discountQ * density / (x.spot * sigma * sqrtT),
+      gamma: discountQ * density / (pricingSpot * sigma * sqrtT),
       theta: x.optionType === "put"
-        ? (thetaCommon + r * x.strike * discountR * normalCdf(-d2) - q * x.spot * discountQ * normalCdf(-d1)) / 365
-        : (thetaCommon - r * x.strike * discountR * normalCdf(d2) + q * x.spot * discountQ * normalCdf(d1)) / 365,
-      vega: x.spot * discountQ * density * sqrtT / 100,
+        ? (thetaCommon + r * x.strike * discountR * normalCdf(-d2) - q * pricingSpot * discountQ * normalCdf(-d1)) / 365
+        : (thetaCommon - r * x.strike * discountR * normalCdf(d2) + q * pricingSpot * discountQ * normalCdf(d1)) / 365,
+      vega: pricingSpot * discountQ * density * sqrtT / 100,
       rho: x.optionType === "put"
         ? -x.strike * T * discountR * normalCdf(-d2) / 100
         : x.strike * T * discountR * normalCdf(d2) / 100,
       model: dividendAdjusted ? "black_scholes_dividend_adjusted" : "black_scholes_european",
+      dividendModel: cashDividendsBeforeExpiry(x).length ? "escrowed_cash_dividend_adjustment" : "continuous_dividend_yield",
+      cashDividendPresentValue: cashDividendPv,
     };
   }
 
@@ -108,15 +129,23 @@
     const sigma = x.volatility / 100;
     const r = x.rate / 100;
     const q = x.dividend / 100;
+    const cashDividendPv = presentValueOfCashDividends(x);
+    const latticeSpot = x.spot - cashDividendPv;
+    if (latticeSpot <= 0) throw new Error("cash-dividend present value must be below spot");
+    const remainingCash = Array.from({ length: steps + 1 }, (_, step) =>
+      presentValueOfCashDividends(x, step * dt));
     const u = Math.exp(sigma * Math.sqrt(dt));
     const d = 1 / u;
     const probability = (Math.exp((r - q) * dt) - d) / (u - d);
     if (!(probability >= 0 && probability <= 1)) throw new Error(`invalid CRR probability ${probability.toFixed(6)}`);
     const discount = Math.exp(-r * dt);
-    let values = Array.from({ length: steps + 1 }, (_, index) => {
-      const stock = x.spot * u ** index * d ** (steps - index);
-      return intrinsic(x, stock);
-    });
+    const stockRatio = u / d;
+    let terminalStock = latticeSpot * d ** steps;
+    let values = new Array(steps + 1);
+    for (let index = 0; index <= steps; index += 1) {
+      values[index] = intrinsic(x, terminalStock + remainingCash[steps]);
+      terminalStock *= stockRatio;
+    }
     let layerOne = null;
     let layerTwo = null;
     const boundary = [];
@@ -124,13 +153,15 @@
       const next = new Array(step + 1);
       const stocks = new Array(step + 1);
       const exerciseSpots = [];
+      let stock = latticeSpot * d ** step;
       for (let index = 0; index <= step; index += 1) {
-        const stock = x.spot * u ** index * d ** (step - index);
-        stocks[index] = stock;
+        const economicStock = stock + remainingCash[step];
+        stocks[index] = economicStock;
         const continuation = discount * ((1 - probability) * values[index] + probability * values[index + 1]);
-        const exercise = intrinsic(x, stock);
+        const exercise = intrinsic(x, economicStock);
         next[index] = american ? Math.max(continuation, exercise) : continuation;
-        if (details && american && exercise > continuation + 1e-12 && exercise > 0) exerciseSpots.push(stock);
+        if (details && american && exercise > continuation + 1e-12 && exercise > 0) exerciseSpots.push(economicStock);
+        stock *= stockRatio;
       }
       values = next;
       if (details && exerciseSpots.length) boundary.push({
@@ -153,7 +184,82 @@
         theta: (layerTwo.values[1] - price) / (2 * dt * 365),
       };
     }
-    return { price, greeks, boundary: boundary.reverse(), steps, model: american ? "binomial_american_crr" : "binomial_european_crr" };
+    return {
+      price,
+      greeks,
+      boundary: boundary.reverse(),
+      steps,
+      model: american ? "binomial_american_crr" : "binomial_european_crr",
+      dividendModel: cashDividendsBeforeExpiry(x).length ? "escrowed_cash_dividend_tree" : "continuous_dividend_yield",
+      cashDividendPresentValue: cashDividendPv,
+    };
+  }
+
+  function crrSmoothedAtSteps(input, { steps, american = true, details = false } = {}) {
+    const primary = crr(input, { steps, american, details });
+    const adjacent = crr(input, { steps: steps + 1, american, details: false });
+    return {
+      ...primary,
+      price: (primary.price + adjacent.price) / 2,
+      rawPrice: primary.price,
+      adjacentPrice: adjacent.price,
+      smoothing: "adjacent_step_average",
+    };
+  }
+
+  function adaptiveCrr(input, {
+    minSteps = 50,
+    maxSteps = 400,
+    tolerance = 0.0025,
+    american = true,
+    details = false,
+  } = {}) {
+    const cleanMin = Math.max(2, Math.floor(Number(minSteps) || 50));
+    const cleanMax = Math.max(cleanMin, Math.floor(Number(maxSteps) || 400));
+    const cleanTolerance = Math.max(1e-8, Number(tolerance) || 0.0025);
+    const schedule = [];
+    for (let steps = cleanMin; steps < cleanMax; steps *= 2) schedule.push(steps);
+    if (!schedule.length || schedule.at(-1) !== cleanMax) schedule.push(cleanMax);
+
+    const history = [];
+    let previousPrice = null;
+    let selected = null;
+    let converged = false;
+    for (const steps of schedule) {
+      const started = typeof performance !== "undefined" ? performance.now() : Date.now();
+      const result = crrSmoothedAtSteps(input, { steps, american, details });
+      const runtimeMs = (typeof performance !== "undefined" ? performance.now() : Date.now()) - started;
+      const differenceFromPrevious = previousPrice == null ? null : result.price - previousPrice;
+      const errorEstimate = differenceFromPrevious == null ? null : Math.abs(differenceFromPrevious);
+      history.push({
+        steps,
+        adjacentSteps: steps + 1,
+        price: result.price,
+        rawPrice: result.rawPrice,
+        adjacentPrice: result.adjacentPrice,
+        differenceFromPrevious,
+        errorEstimate,
+        runtimeMs,
+      });
+      selected = result;
+      // Two refinements are required before declaring convergence. This avoids
+      // stopping on one accidentally close pair in an oscillating lattice.
+      if (history.length >= 3 && errorEstimate <= cleanTolerance) {
+        converged = true;
+        break;
+      }
+      previousPrice = result.price;
+    }
+    return {
+      ...selected,
+      converged,
+      status: converged ? "converged" : "max_steps_reached",
+      tolerance: cleanTolerance,
+      maxSteps: cleanMax,
+      errorEstimate: history.at(-1)?.errorEstimate ?? null,
+      history,
+      method: "adaptive_crr_step_doubling_adjacent_smoothed",
+    };
   }
 
   function trinomial(input, { steps = 100, american = true, details = false } = {}) {
@@ -164,6 +270,11 @@
     const sigma = x.volatility / 100;
     const r = x.rate / 100;
     const q = x.dividend / 100;
+    const cashDividendPv = presentValueOfCashDividends(x);
+    const latticeSpot = x.spot - cashDividendPv;
+    if (latticeSpot <= 0) throw new Error("cash-dividend present value must be below spot");
+    const remainingCash = Array.from({ length: steps + 1 }, (_, step) =>
+      presentValueOfCashDividends(x, step * dt));
     const halfVol = sigma * Math.sqrt(dt / 2);
     const denominator = Math.exp(halfVol) - Math.exp(-halfVol);
     const drift = Math.exp((r - q) * dt / 2);
@@ -173,20 +284,27 @@
     if (Math.min(pu, pm, pd) < -1e-12 || Math.max(pu, pm, pd) > 1 + 1e-12) throw new Error("invalid trinomial probabilities");
     const discount = Math.exp(-r * dt);
     const u = Math.exp(sigma * Math.sqrt(2 * dt));
-    let values = Array.from({ length: 2 * steps + 1 }, (_, index) => intrinsic(x, x.spot * u ** (index - steps)));
+    let terminalStock = latticeSpot * u ** (-steps);
+    let values = new Array(2 * steps + 1);
+    for (let index = 0; index < values.length; index += 1) {
+      values[index] = intrinsic(x, terminalStock + remainingCash[steps]);
+      terminalStock *= u;
+    }
     let layerOne = null;
     const boundary = [];
     for (let step = steps - 1; step >= 0; step -= 1) {
       const next = new Array(2 * step + 1);
       const stocks = new Array(2 * step + 1);
       const exerciseSpots = [];
+      let stock = latticeSpot * u ** (-step);
       for (let index = 0; index < next.length; index += 1) {
-        const stock = x.spot * u ** (index - step);
-        stocks[index] = stock;
+        const economicStock = stock + remainingCash[step];
+        stocks[index] = economicStock;
         const continuation = discount * (pd * values[index] + pm * values[index + 1] + pu * values[index + 2]);
-        const exercise = intrinsic(x, stock);
+        const exercise = intrinsic(x, economicStock);
         next[index] = american ? Math.max(continuation, exercise) : continuation;
-        if (details && american && exercise > continuation + 1e-12 && exercise > 0) exerciseSpots.push(stock);
+        if (details && american && exercise > continuation + 1e-12 && exercise > 0) exerciseSpots.push(economicStock);
+        stock *= u;
       }
       values = next;
       if (details && exerciseSpots.length) boundary.push({
@@ -207,11 +325,20 @@
         theta: (layerOne.values[1] - price) / (dt * 365),
       };
     }
-    return { price, greeks, boundary: boundary.reverse(), steps, model: american ? "trinomial_american" : "trinomial_european" };
+    return {
+      price,
+      greeks,
+      boundary: boundary.reverse(),
+      steps,
+      model: american ? "trinomial_american" : "trinomial_european",
+      dividendModel: cashDividendsBeforeExpiry(x).length ? "escrowed_cash_dividend_tree" : "continuous_dividend_yield",
+      cashDividendPresentValue: cashDividendPv,
+    };
   }
 
   function baw(input) {
     const x = validate(input);
+    if (cashDividendsBeforeExpiry(x).length) throw new Error("BAW does not support discrete cash dividends; use CRR");
     const T = Math.max(x.days / 365, MIN_TIME);
     const sigma = x.volatility / 100;
     const r = x.rate / 100;
@@ -273,6 +400,7 @@
     const lower = Number(options.lower || 0.01);
     const upper = Number(options.upper || 500);
     const tolerance = Number(options.tolerance || 1e-8);
+    const maxIterations = Math.max(10, Math.floor(Number(options.maxIterations) || 60));
     if (!Number.isFinite(target) || target < 0) return { volatility: null, converged: false, status: "invalid_target", reason: "target must be finite and nonnegative", iterations: 0 };
     let clean;
     try { clean = validate(input); } catch (error) {
@@ -285,17 +413,58 @@
     if (american && intrinsic(clean) > 0 && Math.abs(target - intrinsic(clean)) <= tolerance) {
       return { volatility: null, converged: false, status: "intrinsic_boundary", reason: "target equals intrinsic value; IV is not uniquely identifiable", iterations: 0 };
     }
+    const evaluate = (volatility) => {
+      try {
+        const price = modelPrice(pricingModel, { ...clean, volatility });
+        return Number.isFinite(price) ? price : null;
+      } catch (error) {
+        return null;
+      }
+    };
+    const seed = Math.min(Math.max(Number(options.initialGuess) || clean.volatility, lower), upper);
+    const seedPrice = evaluate(seed);
+    if (seedPrice != null && Math.abs(seedPrice - target) <= tolerance) {
+      return { volatility: seed, converged: true, status: "converged", reason: null, iterations: 0, residual: seedPrice - target };
+    }
+    let bracket = null;
+    if (seedPrice != null && seedPrice < target) {
+      let lowPoint = [seed, seedPrice];
+      let volatility = seed;
+      for (let index = 0; index < 24 && volatility < upper; index += 1) {
+        const nextVolatility = Math.min(upper, Math.max(volatility + 0.25, volatility * 1.35));
+        if (nextVolatility === volatility) break;
+        volatility = nextVolatility;
+        const price = evaluate(volatility);
+        if (price == null) continue;
+        if (price + tolerance >= target) { bracket = [lowPoint, [volatility, price]]; break; }
+        lowPoint = [volatility, price];
+      }
+    } else if (seedPrice != null) {
+      let highPoint = [seed, seedPrice];
+      let volatility = seed;
+      for (let index = 0; index < 24 && volatility > lower; index += 1) {
+        const nextVolatility = Math.max(lower, Math.min(volatility - 0.01, volatility / 1.35));
+        if (nextVolatility === volatility) break;
+        volatility = nextVolatility;
+        const price = evaluate(volatility);
+        if (price == null) continue;
+        if (price - tolerance <= target) { bracket = [[volatility, price], highPoint]; break; }
+        highPoint = [volatility, price];
+      }
+    }
+
+    // Unusual low-volatility tree domains can make the seeded search invalid.
+    // Retain a smaller logarithmic fallback grid for correctness.
     const points = [];
     let lastError = null;
-    for (let index = 0; index < 72; index += 1) {
-      const volatility = lower * (upper / lower) ** (index / 71);
+    if (!bracket) for (let index = 0; index < 24; index += 1) {
+      const volatility = lower * (upper / lower) ** (index / 23);
       try {
         const price = modelPrice(pricingModel, { ...clean, volatility });
         if (Number.isFinite(price)) points.push([volatility, price]);
       } catch (error) { lastError = error.message; }
     }
-    let bracket = null;
-    for (let index = 0; index < points.length - 1; index += 1) {
+    for (let index = 0; !bracket && index < points.length - 1; index += 1) {
       if (points[index][1] - tolerance <= target && target <= points[index + 1][1] + tolerance) {
         bracket = [points[index], points[index + 1]];
         break;
@@ -306,7 +475,7 @@
     let [high] = bracket[1];
     let middle = low;
     let price = lowPrice;
-    for (let iteration = 1; iteration <= 100; iteration += 1) {
+    for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
       middle = (low + high) / 2;
       try { price = modelPrice(pricingModel, { ...clean, volatility: middle }); }
       catch (error) { return { volatility: null, converged: false, status: "pricing_error", reason: error.message, iterations: iteration }; }
@@ -316,7 +485,7 @@
       }
       if (residual < 0) low = middle; else high = middle;
     }
-    return { volatility: middle, converged: false, status: "max_iterations", reason: "solver iteration limit", iterations: 100, residual: price - target };
+    return { volatility: middle, converged: false, status: "max_iterations", reason: "solver iteration limit", iterations: maxIterations, residual: price - target };
   }
 
   const blackScholesModel = (dividendAdjusted = true) => ({
@@ -351,7 +520,8 @@
 
   function compareModels(input) {
     const {
-      ticker, marketMid, marketIv, forecastVolatility, treeSteps = 75,
+      ticker, marketMid, marketIv, forecastVolatility, treeSteps = 400,
+      treeTolerance = 0.0025, treeMinSteps = 50,
       optionStyle = null, instrumentType = null, calculateIv = false,
     } = input;
     const style = resolveStyle(ticker, optionStyle, instrumentType, input.styleMap || {});
@@ -377,26 +547,58 @@
     let earlyExercisePremium = 0;
     let sameTreeExercisePremium = 0;
     let treeDifference = null;
+    let treeStepsUsed = null;
+    let treeConverged = null;
+    let treeConvergenceError = null;
+    let treeConvergenceStatus = "not_applicable";
+    let treeHistory = [];
     if (style.style === "american") {
       try {
-        const binMarketResult = crr(marketInput, { steps: treeSteps, american: true, details: true });
-        const binForecastResult = crr(forecastInput, { steps: treeSteps, american: true });
-        const triForecastResult = trinomial(forecastInput, { steps: treeSteps, american: true });
-        binomialMarket = binMarketResult.price;
+        const binForecastResult = adaptiveCrr(forecastInput, {
+          minSteps: treeMinSteps,
+          maxSteps: treeSteps,
+          tolerance: treeTolerance,
+          american: true,
+        });
+        treeStepsUsed = binForecastResult.steps;
+        treeConverged = binForecastResult.converged;
+        treeConvergenceError = binForecastResult.errorEstimate;
+        treeConvergenceStatus = binForecastResult.status;
+        treeHistory = binForecastResult.history;
+        const binMarketResult = calculateIv
+          ? crrSmoothedAtSteps(marketInput, {
+              steps: treeStepsUsed,
+              american: true,
+              details: true,
+            })
+          : null;
+        const europeanForecastResult = crrSmoothedAtSteps(forecastInput, {
+          steps: treeStepsUsed,
+          american: false,
+        });
+        const triForecastResult = trinomial(forecastInput, { steps: treeStepsUsed, american: true });
+        binomialMarket = binMarketResult?.price ?? null;
         binomialForecast = binForecastResult.price;
         trinomialForecast = triForecastResult.price;
-        americanGreeks = binMarketResult.greeks;
+        americanGreeks = binMarketResult?.greeks ?? null;
         treeDifference = Math.abs(binomialForecast - trinomialForecast);
         earlyExercisePremium = Math.max(binomialForecast - bsForecast.price, 0);
         sameTreeExercisePremium = Math.max(
-          binomialForecast - crr(forecastInput, { steps: treeSteps, american: false }).price,
+          binomialForecast - europeanForecastResult.price,
           0,
         );
         try { approximationForecast = baw(forecastInput).price; }
         catch (error) { warnings.push(`BAW unavailable: ${error.message}`); }
-        if (calculateIv) americanIv = impliedVolatility(marketMid, crrModel(treeSteps, true), marketInput);
+        if (calculateIv) americanIv = impliedVolatility(marketMid, crrModel(treeStepsUsed, true), marketInput, {
+          initialGuess: marketIv,
+          tolerance: 1e-6,
+          maxIterations: 60,
+        });
         const poorAgreement = treeDifference > Math.max(0.02, 0.005 * Math.max(binomialForecast, 1));
-        if (poorAgreement) {
+        if (!treeConverged) {
+          warnings.push(`CRR did not converge to $${Number(treeTolerance).toFixed(4)} by ${treeStepsUsed} steps; last error estimate was ${Number.isFinite(treeConvergenceError) ? `$${treeConvergenceError.toFixed(4)}` : "unavailable"}`);
+          modelReason = "Black-Scholes fallback because the American tree did not meet its convergence tolerance";
+        } else if (poorAgreement) {
           warnings.push(`tree convergence warning: CRR/trinomial differ by $${treeDifference.toFixed(3)}`);
           modelReason = "Black-Scholes fallback because American tree agreement was poor";
         } else if (sameTreeExercisePremium >= 0.01) {
@@ -435,6 +637,13 @@
       earlyExercisePremium,
       sameTreeExercisePremium,
       treeDifference,
+      treeStepsUsed,
+      treeMaxSteps: Number(treeSteps),
+      treeConvergenceTolerance: Number(treeTolerance),
+      treeConvergenceError,
+      treeConverged,
+      treeConvergenceStatus,
+      treeHistory,
       blackScholesIv: bsIv.volatility,
       americanIv: americanIv.volatility,
       ivSolverStatus: modelUsed === "binomial_american_crr" ? americanIv.status : bsIv.status,
@@ -470,6 +679,8 @@
     blackScholesModel,
     crr,
     crrModel,
+    crrSmoothedAtSteps,
+    adaptiveCrr,
     trinomial,
     trinomialModel,
     baw,

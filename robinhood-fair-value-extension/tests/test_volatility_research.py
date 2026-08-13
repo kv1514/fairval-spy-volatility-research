@@ -27,11 +27,28 @@ from volatility_research.engine import (  # noqa: E402
     _future_realized_vol,
     _sparse_variance_weights,
     diagnose_models_by_moneyness,
+    evaluate_forecasts,
     format_blend_formula,
     rank_option_contracts,
     threshold_sensitivity_study,
 )
-from volatility_research.surface import add_volatility_surface_context  # noqa: E402
+from volatility_research.conditional_variance import (  # noqa: E402
+    average_forward_variance,
+    fit_garch_qmle,
+    walk_forward_garch,
+)
+from volatility_research.paper_backtest import (  # noqa: E402
+    build_forward_outcomes,
+    evaluate_signal_regression,
+    walk_forward_signal_regression,
+)
+from volatility_research.surface import (  # noqa: E402
+    add_volatility_surface_context,
+    fit_svi_slice,
+    prepare_surface_contracts,
+    svi_butterfly_g,
+    svi_total_variance,
+)
 
 
 def sample_prices(periods: int = 145) -> pd.DataFrame:
@@ -126,6 +143,30 @@ class WalkForwardTests(unittest.TestCase):
             (pd.to_datetime(trained["parameter_train_end"]) <= pd.to_datetime(trained["date"])).all()
         )
 
+    def test_garch_models_are_positive_stationary_and_past_trained(self) -> None:
+        for model in ("garch_11", "gjr_garch"):
+            rows = self.forecasts[self.forecasts["model"] == model]
+            self.assertGreater(len(rows), 0)
+            self.assertTrue((rows["forecast_vol"] > 0).all())
+            trained = rows.dropna(subset=["parameter_train_end"])
+            self.assertGreater(len(trained), 0)
+            self.assertTrue((pd.to_datetime(trained["parameter_train_end"]) <= pd.to_datetime(trained["date"])).all())
+            for parameters in rows["parameters_used"].dropna():
+                self.assertGreater(parameters["persistence"], 0.0)
+                self.assertLess(parameters["persistence"], 1.0)
+                self.assertGreater(parameters["next_variance"], 0.0)
+
+    def test_adaptive_ensemble_weights_are_convex_and_past_trained(self) -> None:
+        history = self.engine.ensemble_weights_history_
+        weight_columns = [column for column in history if column.startswith("weight_")]
+        self.assertGreater(len(weight_columns), 3)
+        weights = history[weight_columns].to_numpy(dtype=float)
+        self.assertTrue(np.all(weights >= -1e-12))
+        np.testing.assert_allclose(weights.sum(axis=1), 1.0, atol=1e-9)
+        trained = history.dropna(subset=["parameter_train_end"])
+        self.assertGreater(len(trained), 0)
+        self.assertTrue((pd.to_datetime(trained["parameter_train_end"]) <= pd.to_datetime(trained["date"])).all())
+
     def test_target_dates_are_strictly_future(self) -> None:
         completed = self.forecasts.dropna(subset=["future_realized_vol"]).copy()
         self.assertTrue((pd.to_datetime(completed["target_start_date"]) > pd.to_datetime(completed["date"])).all())
@@ -152,12 +193,90 @@ class WalkForwardTests(unittest.TestCase):
         self.assertIn("training_mse_variance", self.engine.model_selection_history_.columns)
         self.assertNotIn("training_mae", self.engine.model_selection_history_.columns)
 
+    def test_evaluation_includes_robust_loss_and_calibration(self) -> None:
+        evaluation = evaluate_forecasts(self.forecasts)
+        self.assertTrue({"mean_qlike", "variance_bias", "mz_intercept", "mz_slope", "mz_r_squared"}.issubset(evaluation.columns))
+        self.assertTrue(np.isfinite(evaluation["mean_qlike"]).all())
+
     def test_multiple_ticker_groups_keep_independent_date_indexes(self) -> None:
         qqq = self.prices.assign(ticker="QQQ", close=self.prices["close"] * 0.9)
         engine = VolatilityResearchEngine(ForecastConfig(horizons=(5,), min_train_observations=12, rebalance_every=10))
         result = engine.fit_predict(pd.concat([self.prices, qqq], ignore_index=True))
         self.assertEqual(set(result["ticker"]), {"SPY", "QQQ"})
         self.assertEqual(result.groupby("ticker").size().nunique(), 1)
+
+
+class ConditionalVarianceUnitTests(unittest.TestCase):
+    def test_qmle_parameters_and_forward_variance_are_valid(self) -> None:
+        index = np.arange(300, dtype=float)
+        returns = 0.008 * np.sin(index / 7.0) + np.where(index % 17 == 0, -0.025, 0.001)
+        for asymmetric in (False, True):
+            parameters = fit_garch_qmle(returns, asymmetric=asymmetric)
+            self.assertGreater(parameters["alpha"], 0.0)
+            self.assertGreater(parameters["beta"], 0.0)
+            self.assertGreaterEqual(parameters["gamma"], 0.0)
+            self.assertLess(parameters["persistence"], 1.0)
+            self.assertGreater(average_forward_variance(parameters, 10), 0.0)
+
+    def test_walk_forward_garch_does_not_use_later_returns(self) -> None:
+        dates = pd.bdate_range("2024-01-02", periods=120)
+        returns = 0.01 * np.sin(np.arange(120) / 6.0)
+        full, _, _ = walk_forward_garch(
+            returns, dates, (5,), asymmetric=True, min_train_observations=30,
+            training_window=80, rebalance_every=5,
+        )
+        altered = returns.copy()
+        altered[91:] = 0.50
+        changed, _, _ = walk_forward_garch(
+            altered, dates, (5,), asymmetric=True, min_train_observations=30,
+            training_window=80, rebalance_every=5,
+        )
+        self.assertAlmostEqual(float(full[5][90]), float(changed[5][90]), places=12)
+
+
+class PaperOutcomeRegressionTests(unittest.TestCase):
+    @staticmethod
+    def _paper_records(count: int = 150) -> list[dict]:
+        records = []
+        base = pd.Timestamp("2026-01-02T15:00:00Z").timestamp() * 1000
+        for index in range(count):
+            observed = base + index * 2 * 60 * 60 * 1000
+            edge = 1.0 + (index % 10)
+            contract = f"SPY-{index}"
+            common = {
+                "contractKey": contract, "strike": 500.0, "marketDelta": 0.50,
+                "spot": 500.0, "varianceEdge": edge / 1000.0,
+                "gammaWeightedEdge": edge, "vegaNormalizedEdge": edge / 5.0,
+                "edgePercent": edge, "marketIv": 20.0, "forecastAtmIv": 22.0,
+                "days": 5.0, "volume": 100 + index, "openInterest": 500 + index,
+            }
+            records.append({
+                **common, "observedAt": observed, "flagDirection": "below-model",
+                "bid": 0.95, "mark": 1.00, "ask": 1.05,
+            })
+            records.append({
+                **common, "observedAt": observed + 60 * 60 * 1000, "flagDirection": None,
+                "bid": 1.00 + edge / 100.0, "mark": 1.05 + edge / 100.0,
+                "ask": 1.10 + edge / 100.0, "spot": 500.0,
+            })
+        return records
+
+    def test_outcome_pairing_uses_executable_sides(self) -> None:
+        outcomes = build_forward_outcomes(self._paper_records(3), horizon_minutes=60)
+        self.assertEqual(len(outcomes), 3)
+        self.assertTrue((outcomes["entryExecutable"] == 1.05).all())
+        self.assertTrue((outcomes["exitExecutable"] > 1.00).all())
+
+    def test_signal_regression_is_strictly_walk_forward(self) -> None:
+        outcomes = build_forward_outcomes(self._paper_records(), horizon_minutes=60)
+        predicted = walk_forward_signal_regression(
+            outcomes, min_train_observations=30, training_window=100, rebalance_every=10,
+        )
+        valid = predicted.dropna(subset=["predictedPnlContract"])
+        self.assertGreater(len(valid), 50)
+        self.assertTrue((pd.to_datetime(valid["regressionTrainEnd"], utc=True) < pd.to_datetime(valid["signalTime"], utc=True)).all())
+        diagnostics = evaluate_signal_regression(predicted)
+        self.assertGreater(int(diagnostics.loc[0, "observations"]), 50)
 
 
 class PricingAndRankingTests(unittest.TestCase):
@@ -262,6 +381,46 @@ class PricingAndRankingTests(unittest.TestCase):
 
 
 class SurfaceAndDiagnosticsTests(unittest.TestCase):
+    def test_svi_recovers_a_smooth_forward_moneyness_slice(self) -> None:
+        parameters = {"a": 0.012, "b": 0.08, "rho": -0.35, "m": 0.01, "sigma": 0.18}
+        k = np.linspace(-0.25, 0.25, 13)
+        variance = svi_total_variance(k, parameters)
+        variance[2] += 0.004  # visible outlier; robust weights should contain it
+        fit = fit_svi_slice(k, variance)
+        self.assertEqual(fit["status"], "fitted")
+        self.assertTrue(bool(fit["parameter_constraint_satisfied"]))
+        self.assertGreater(float(np.min(svi_butterfly_g(k, fit["parameters"]))), -1e-6)
+        fitted = svi_total_variance(k, fit["parameters"])
+        clean = np.ones_like(k, dtype=bool)
+        clean[2] = False
+        self.assertLess(float(np.sqrt(np.mean(np.square(fitted[clean] - svi_total_variance(k[clean], parameters))))), 0.002)
+
+    def test_surface_uses_forward_not_spot_log_moneyness(self) -> None:
+        prepared = prepare_surface_contracts(pd.DataFrame([{
+            "ticker": "SPY", "date": "2026-08-05", "expiration": "2027-08-05", "dte": 365,
+            "option_type": "call", "strike": 100, "spot": 100, "market_iv": 20,
+            "rate": 10, "dividend": 0,
+        }]))
+        self.assertAlmostEqual(float(prepared.loc[0, "spot_log_moneyness"]), 0.0, places=12)
+        self.assertAlmostEqual(float(prepared.loc[0, "log_moneyness"]), -0.10, places=12)
+
+    def test_svi_calendar_diagnostic_detects_decreasing_total_variance(self) -> None:
+        date = pd.Timestamp("2026-08-05")
+        rows = []
+        for dte, total_variance in ((10, 0.04), (30, 0.03)):
+            iv = math.sqrt(total_variance / (dte / 365.0)) * 100.0
+            for strike in np.linspace(80, 120, 9):
+                rows.append({
+                    "ticker": "SPY", "date": date, "expiration": date + pd.Timedelta(days=dte),
+                    "dte": dte, "option_type": "call", "strike": strike, "spot": 100,
+                    "market_iv": iv,
+                })
+        surface = add_volatility_surface_context(pd.DataFrame(rows))
+        longer = surface[surface["dte"] == 30]
+        self.assertTrue((longer["svi_status"] == "fitted").all())
+        self.assertFalse(bool(longer["svi_calendar_arbitrage_free"].all()))
+        self.assertLess(float(longer["svi_calendar_min_total_variance_change"].iloc[0]), 0)
+
     def test_surface_context_has_atm_skew_term_structure_and_past_only_percentile(self) -> None:
         as_of = pd.Timestamp("2026-08-05")
         rows = []
@@ -325,7 +484,10 @@ class SurfaceAndDiagnosticsTests(unittest.TestCase):
         diagnostics = diagnose_models_by_moneyness(forecasts, history)
         self.assertEqual(
             set(diagnostics["model"]),
-            {"optimized_blend", "sparse_blend", "ewma", "har_rv", "realized_20", "realized_60"},
+            {
+                "optimized_blend", "sparse_blend", "ewma", "har_rv", "garch_11", "gjr_garch",
+                "simple_ensemble", "adaptive_ensemble", "realized_20", "realized_60",
+            },
         )
         winners = diagnostics[diagnostics["is_best"]]
         self.assertEqual(

@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from .black_scholes import black_scholes_greeks, black_scholes_price
+from .conditional_variance import walk_forward_garch
 from .pricing_models import PricingInputs, contract_pricing_diagnostics
 from .surface import add_volatility_surface_context, prepare_surface_contracts, surface_benchmark_records
 
@@ -28,10 +29,15 @@ CANDIDATE_WINDOWS = (1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 45, 60)
 VOL_WINDOWS = REPORT_WINDOWS  # backwards-compatible alias for the baseline set
 DEFAULT_HORIZONS = (1, 2, 3, 5, 10)
 FIXED_WEIGHTS = np.array([0.40, 0.30, 0.20, 0.10], dtype=float)
-MODEL_NAMES = (
+BASE_MODEL_NAMES = (
     "realized_5", "realized_10", "realized_20", "realized_60",
     "fixed_blend", "optimized_blend", "sparse_blend", "ewma", "har_rv",
+    "garch_11", "gjr_garch",
 )
+ENSEMBLE_COMPONENTS = (
+    "realized_20", "realized_60", "optimized_blend", "ewma", "har_rv", "garch_11", "gjr_garch",
+)
+MODEL_NAMES = (*BASE_MODEL_NAMES, "simple_ensemble", "adaptive_ensemble")
 HAR_WINDOWS = (1, 5, 20)
 
 
@@ -50,6 +56,7 @@ class ForecastConfig:
     projected_gradient_iterations: int = 400
     projected_gradient_tolerance: float = 1e-13
     har_ridge_penalty: float = 1e-3
+    ensemble_shrinkage: float = 0.10
 
 
 def _validate_columns(frame: pd.DataFrame, required: Iterable[str], label: str) -> None:
@@ -343,6 +350,8 @@ class VolatilityResearchEngine:
         self.config = config or ForecastConfig()
         self.lambda_performance_: pd.DataFrame = pd.DataFrame()
         self.weights_history_: pd.DataFrame = pd.DataFrame()
+        self.ensemble_weights_history_: pd.DataFrame = pd.DataFrame()
+        self.garch_parameters_: pd.DataFrame = pd.DataFrame()
         self.model_selection_history_: pd.DataFrame = pd.DataFrame()
         self.price_features_: pd.DataFrame = pd.DataFrame()
 
@@ -386,6 +395,8 @@ class VolatilityResearchEngine:
         output_rows: list[dict] = []
         lambda_curve_rows: list[dict] = []
         weight_rows: list[dict] = []
+        ensemble_weight_rows: list[dict] = []
+        garch_parameter_rows: list[dict] = []
         selection_rows: list[dict] = []
         feature_frames: list[pd.DataFrame] = []
 
@@ -394,6 +405,38 @@ class VolatilityResearchEngine:
             feature_frames.append(base.copy())
             returns = base["log_return"].to_numpy()
             dates = base["date"].to_numpy()
+            garch_paths, garch_parameters, garch_train_ends = walk_forward_garch(
+                returns,
+                dates,
+                self.config.horizons,
+                asymmetric=False,
+                min_train_observations=self.config.min_train_observations,
+                training_window=self.config.training_window,
+                rebalance_every=self.config.rebalance_every,
+            )
+            gjr_paths, gjr_parameters, gjr_train_ends = walk_forward_garch(
+                returns,
+                dates,
+                self.config.horizons,
+                asymmetric=True,
+                min_train_observations=self.config.min_train_observations,
+                training_window=self.config.training_window,
+                rebalance_every=self.config.rebalance_every,
+            )
+            for index, origin_value in enumerate(dates):
+                for model_name, parameters, train_end in (
+                    ("garch_11", garch_parameters[index], garch_train_ends[index]),
+                    ("gjr_garch", gjr_parameters[index], gjr_train_ends[index]),
+                ):
+                    if parameters is None:
+                        continue
+                    garch_parameter_rows.append({
+                        "ticker": ticker,
+                        "date": pd.Timestamp(origin_value),
+                        "model": model_name,
+                        "parameter_train_end": train_end,
+                        **parameters,
+                    })
             candidate_windows = self._candidate_windows
             all_windows = self._all_windows
             for horizon in self.config.horizons:
@@ -418,6 +461,16 @@ class VolatilityResearchEngine:
                     index=panel.index,
                     dtype=object,
                 )
+                panel["garch_11"] = [garch_paths[int(horizon)][index] for index in original_indices]
+                panel["garch_parameters"] = pd.Series(
+                    [garch_parameters[index] for index in original_indices], index=panel.index, dtype=object,
+                )
+                panel["garch_train_end"] = [garch_train_ends[index] for index in original_indices]
+                panel["gjr_garch"] = [gjr_paths[int(horizon)][index] for index in original_indices]
+                panel["gjr_parameters"] = pd.Series(
+                    [gjr_parameters[index] for index in original_indices], index=panel.index, dtype=object,
+                )
+                panel["gjr_train_end"] = [gjr_train_ends[index] for index in original_indices]
 
                 optimized_values: list[float] = []
                 optimized_weights: list[dict] = []
@@ -520,6 +573,53 @@ class VolatilityResearchEngine:
                 panel["ewma_train_end"] = ewma_train_end
                 panel["har_rv"] = har_values
                 panel["har_train_end"] = har_train_end
+                component_count = len(ENSEMBLE_COMPONENTS)
+                simple_weights = _uniform_weights(component_count)
+                panel["simple_ensemble"] = np.sqrt(np.mean(
+                    np.square(panel[list(ENSEMBLE_COMPONENTS)].to_numpy(dtype=float)), axis=1,
+                ))
+                adaptive_values: list[float] = []
+                adaptive_weights_values: list[dict] = []
+                adaptive_train_ends: list[pd.Timestamp | pd.NaT] = []
+                last_ensemble_weights = simple_weights.copy()
+                last_ensemble_train_end = pd.NaT
+                shrinkage = float(np.clip(self.config.ensemble_shrinkage, 0.0, 1.0))
+                for position, row in panel.iterrows():
+                    origin = pd.Timestamp(row["date"])
+                    training = _training_rows(panel.iloc[:position], origin, self.config)
+                    rebalance = position % max(self.config.rebalance_every, 1) == 0
+                    if rebalance and len(training) >= self.config.min_train_observations:
+                        fitted = _optimize_variance_weights(
+                            training[list(ENSEMBLE_COMPONENTS)].to_numpy(dtype=float),
+                            training["target_future_vol"].to_numpy(dtype=float),
+                            self.config,
+                        )
+                        # Shrink the regression toward the simple combination.
+                        # Highly correlated volatility forecasts make unrestricted
+                        # combination weights unstable in small rolling samples.
+                        last_ensemble_weights = (1.0 - shrinkage) * fitted + shrinkage * simple_weights
+                        last_ensemble_weights = last_ensemble_weights / last_ensemble_weights.sum()
+                        last_ensemble_train_end = pd.Timestamp(training["target_end_date"].max())
+                    current = row[list(ENSEMBLE_COMPONENTS)].to_numpy(dtype=float)
+                    adaptive_values.append(float(np.sqrt(np.dot(last_ensemble_weights, np.square(current)))))
+                    weight_dict = {
+                        model: float(weight)
+                        for model, weight in zip(ENSEMBLE_COMPONENTS, last_ensemble_weights, strict=True)
+                    }
+                    adaptive_weights_values.append(weight_dict)
+                    adaptive_train_ends.append(last_ensemble_train_end)
+                    ensemble_weight_rows.append({
+                        "ticker": ticker,
+                        "date": origin,
+                        "horizon": int(horizon),
+                        "parameter_train_end": last_ensemble_train_end,
+                        "n_train": len(training),
+                        "shrinkage": shrinkage,
+                        **{f"weight_{model}": weight for model, weight in weight_dict.items()},
+                    })
+                panel["adaptive_ensemble"] = adaptive_values
+                panel["adaptive_ensemble_weights"] = adaptive_weights_values
+                panel["adaptive_ensemble_train_end"] = adaptive_train_ends
 
                 selected_models: list[str] = []
                 selected_train_end: list[pd.Timestamp | pd.NaT] = []
@@ -568,6 +668,10 @@ class VolatilityResearchEngine:
                         str(window): float(weight)
                         for window, weight in zip(REPORT_WINDOWS, FIXED_WEIGHTS, strict=True)
                     }
+                    simple_ensemble_weights = {
+                        model: float(weight)
+                        for model, weight in zip(ENSEMBLE_COMPONENTS, _uniform_weights(len(ENSEMBLE_COMPONENTS)), strict=True)
+                    }
 
                     def _weights_for(model: str) -> dict | None:
                         if model == "optimized_blend":
@@ -576,6 +680,17 @@ class VolatilityResearchEngine:
                             return row["sparse_weights"]
                         if model == "fixed_blend":
                             return fixed_weights_dict
+                        if model == "simple_ensemble":
+                            return simple_ensemble_weights
+                        if model == "adaptive_ensemble":
+                            return row["adaptive_ensemble_weights"]
+                        return None
+
+                    def _parameters_for(model: str) -> dict | None:
+                        if model == "garch_11":
+                            return row["garch_parameters"]
+                        if model == "gjr_garch":
+                            return row["gjr_parameters"]
                         return None
 
                     def _param_end_for(model: str):
@@ -587,6 +702,12 @@ class VolatilityResearchEngine:
                             return row["sparse_train_end"]
                         if model == "har_rv":
                             return row["har_train_end"]
+                        if model == "garch_11":
+                            return row["garch_train_end"]
+                        if model == "gjr_garch":
+                            return row["gjr_train_end"]
+                        if model == "adaptive_ensemble":
+                            return row["adaptive_ensemble_train_end"]
                         return pd.NaT
 
                     for model in MODEL_NAMES:
@@ -597,6 +718,7 @@ class VolatilityResearchEngine:
                             "forecast_vol": float(row[model]),
                             "lambda_used": float(row["ewma_lambda"]) if model == "ewma" else np.nan,
                             "weights_used": _weights_for(model),
+                            "parameters_used": _parameters_for(model),
                             "parameter_train_end": _param_end_for(model),
                         })
                     selected = str(row["selected_model"])
@@ -607,11 +729,14 @@ class VolatilityResearchEngine:
                         "forecast_vol": float(row[selected]),
                         "lambda_used": float(row["ewma_lambda"]) if selected == "ewma" else np.nan,
                         "weights_used": _weights_for(selected),
+                        "parameters_used": _parameters_for(selected),
                         "parameter_train_end": row["selection_train_end"],
                     })
 
         self.lambda_performance_ = pd.DataFrame(lambda_curve_rows)
         self.weights_history_ = pd.DataFrame(weight_rows)
+        self.ensemble_weights_history_ = pd.DataFrame(ensemble_weight_rows)
+        self.garch_parameters_ = pd.DataFrame(garch_parameter_rows)
         self.model_selection_history_ = pd.DataFrame(selection_rows)
         self.price_features_ = pd.concat(feature_frames, ignore_index=True) if feature_frames else pd.DataFrame()
         result = pd.DataFrame(output_rows).sort_values(["ticker", "date", "horizon", "model"]).reset_index(drop=True)
@@ -626,13 +751,36 @@ def evaluate_forecasts(
     _validate_columns(forecasts, ("ticker", "date", "horizon", "model", "forecast_vol", "future_realized_vol"), "forecasts")
     valid = forecasts.dropna(subset=["forecast_vol", "future_realized_vol"]).copy()
     valid["error"] = valid["forecast_vol"] - valid["future_realized_vol"]
-    valid["variance_error"] = np.square(valid["forecast_vol"] / 100.0) - np.square(valid["future_realized_vol"] / 100.0)
+    valid["forecast_variance"] = np.square(valid["forecast_vol"] / 100.0)
+    valid["realized_variance"] = np.square(valid["future_realized_vol"] / 100.0)
+    valid["variance_error"] = valid["forecast_variance"] - valid["realized_variance"]
+    ratio = np.maximum(valid["realized_variance"], 1e-12) / np.maximum(valid["forecast_variance"], 1e-12)
+    valid["qlike"] = ratio - np.log(ratio) - 1.0
     metrics = valid.groupby(["model", "horizon"], as_index=False).agg(
         observations=("error", "size"),
         mae=("error", lambda values: float(np.mean(np.abs(values)))),
         rmse=("error", lambda values: float(np.sqrt(np.mean(np.square(values))))),
         mse_variance=("variance_error", lambda values: float(np.mean(np.square(values)))),
+        variance_bias=("variance_error", "mean"),
+        mean_qlike=("qlike", "mean"),
     )
+    calibration_rows = []
+    for (model, horizon), group in valid.groupby(["model", "horizon"], sort=True):
+        forecast_variance = group["forecast_variance"].to_numpy(dtype=float)
+        realized_variance = group["realized_variance"].to_numpy(dtype=float)
+        design = np.column_stack([np.ones(len(group)), forecast_variance])
+        coefficients = np.linalg.lstsq(design, realized_variance, rcond=None)[0]
+        fitted = design @ coefficients
+        denominator = float(np.sum(np.square(realized_variance - realized_variance.mean())))
+        r_squared = 1.0 - float(np.sum(np.square(realized_variance - fitted))) / denominator if denominator > 0 else np.nan
+        calibration_rows.append({
+            "model": model,
+            "horizon": int(horizon),
+            "mz_intercept": float(coefficients[0]),
+            "mz_slope": float(coefficients[1]),
+            "mz_r_squared": r_squared,
+        })
+    metrics = metrics.merge(pd.DataFrame(calibration_rows), on=["model", "horizon"], how="left")
     metrics["directional_accuracy_vs_market_iv"] = np.nan
     metrics["directional_observations"] = 0
     if market_iv is None or market_iv.empty:
@@ -661,7 +809,10 @@ def evaluate_forecasts(
 def diagnose_models_by_moneyness(
     forecasts: pd.DataFrame,
     option_history: pd.DataFrame | None = None,
-    models: Iterable[str] = ("optimized_blend", "sparse_blend", "ewma", "har_rv", "realized_20", "realized_60"),
+    models: Iterable[str] = (
+        "optimized_blend", "sparse_blend", "ewma", "har_rv", "garch_11", "gjr_garch",
+        "simple_ensemble", "adaptive_ensemble", "realized_20", "realized_60",
+    ),
     horizons: Iterable[int] = DEFAULT_HORIZONS,
 ) -> pd.DataFrame:
     """Compare requested models on out-of-sample variance loss by ticker/horizon/bucket."""
@@ -694,6 +845,10 @@ def diagnose_models_by_moneyness(
         np.square(combined["forecast_vol"] / 100.0)
         - np.square(combined["future_realized_vol"] / 100.0)
     )
+    forecast_variance = np.maximum(np.square(combined["forecast_vol"] / 100.0), 1e-12)
+    realized_variance = np.maximum(np.square(combined["future_realized_vol"] / 100.0), 1e-12)
+    qlike_ratio = realized_variance / forecast_variance
+    combined["qlike"] = qlike_ratio - np.log(qlike_ratio) - 1.0
     diagnostics = combined.groupby(
         ["ticker", "horizon", "moneyness_bucket", "model"], as_index=False,
     ).agg(
@@ -703,6 +858,7 @@ def diagnose_models_by_moneyness(
         rmse_variance=("variance_error", lambda values: float(np.sqrt(np.mean(np.square(values))))),
         mae_vol=("vol_error", lambda values: float(np.mean(np.abs(values)))),
         rmse_vol=("vol_error", lambda values: float(np.sqrt(np.mean(np.square(values))))),
+        mean_qlike=("qlike", "mean"),
     )
     group_columns = ["ticker", "horizon", "moneyness_bucket"]
     best = diagnostics.loc[
@@ -819,7 +975,8 @@ def rank_option_contracts(
     max_spread_percent: float = 20.0,
     minimum_volume: int = 10,
     minimum_open_interest: int = 100,
-    tree_steps: int = 75,
+    tree_steps: int = 400,
+    tree_tolerance: float = 0.0025,
     style_map: dict[str, dict[str, str]] | None = None,
 ) -> pd.DataFrame:
     required = ("ticker", "date", "expiration", "option_type", "strike", "market_iv", "bid", "ask", "volume", "open_interest")
@@ -873,6 +1030,7 @@ def rank_option_contracts(
     ranked["forecast_model_used"] = [row["model_used"] if row is not None else None for row in selected_rows]
     ranked["lambda_used"] = [row["lambda_used"] if row is not None else np.nan for row in selected_rows]
     ranked["weights_used"] = [row["weights_used"] if row is not None else None for row in selected_rows]
+    ranked["parameters_used"] = [row.get("parameters_used") if row is not None else None for row in selected_rows]
     ranked["future_realized_vol"] = [row["future_realized_vol"] if row is not None else np.nan for row in selected_rows]
     ranked = ranked.dropna(subset=["spot", "strike", "market_iv", "forecast_vol", "market_mid", "bid", "ask"])
 
@@ -883,6 +1041,17 @@ def rank_option_contracts(
 
     pricing_rows: list[dict] = []
     for row in ranked.itertuples(index=False):
+        raw_dividends = getattr(row, "discrete_dividends", None)
+        if isinstance(raw_dividends, str) and raw_dividends.strip():
+            try:
+                raw_dividends = json.loads(raw_dividends)
+            except json.JSONDecodeError:
+                raw_dividends = []
+        discrete_dividends = tuple(
+            (float(item.get("days")), float(item.get("amount")))
+            for item in (raw_dividends or [])
+            if isinstance(item, dict) and item.get("days") is not None and item.get("amount") is not None
+        )
         pricing_rows.append(contract_pricing_diagnostics(
             ticker=row.ticker,
             market_mid=float(row.market_mid),
@@ -892,17 +1061,21 @@ def rank_option_contracts(
                 spot=float(row.spot), strike=float(row.strike), dte=float(row.dte),
                 volatility=float(row.market_iv), rate=float(row.rate), dividend=float(row.dividend),
                 option_type=str(row.option_type), exercise_style="european",
+                discrete_dividends=discrete_dividends,
             ),
             option_style=getattr(row, "option_style", None),
             instrument_type=getattr(row, "instrument_type", None),
             style_map=style_map,
             tree_steps=tree_steps,
+            tree_tolerance=tree_tolerance,
         ))
     pricing_frame = pd.DataFrame(pricing_rows, index=ranked.index)
     # Avoid duplicate source columns (for example instrument_type supplied by a
     # broker) while keeping the pricing resolver's normalized result explicit.
-    for column in pricing_frame.columns:
-        ranked[column] = pricing_frame[column]
+    ranked = pd.concat([
+        ranked.drop(columns=[column for column in pricing_frame.columns if column in ranked], errors="ignore"),
+        pricing_frame,
+    ], axis=1).copy()
 
     # Backwards-compatible aliases now point to the selected forecast-volatility
     # model, never to the circular market-IV diagnostic.
@@ -1008,6 +1181,15 @@ def rank_option_contracts(
         0.75 * ranked["model_confidence"].astype(float) + 0.25 * liquidity_confidence
     ).clip(lower=0.0, upper=1.0)
     ranked["liquidity_score"] = np.log1p(ranked["volume"].clip(lower=0)) + 0.5 * np.log1p(ranked["open_interest"].clip(lower=0))
+    ranked["surface_numerical_pass"] = (
+        (ranked["svi_status"] != "fitted")
+        | (
+            ~ranked["svi_outlier"].astype(bool)
+            & ranked["svi_butterfly_arbitrage_free"].astype(bool)
+            & ranked["svi_calendar_arbitrage_free"].astype(bool)
+            & ranked["svi_parameter_constraints_satisfied"].astype(bool)
+        )
+    )
     ranked["surface_context_pass"] = np.select(
         [
             (ranked["candidate_side"] == "long_vol") & (ranked["iv_percentile"] <= 40.0),
@@ -1015,13 +1197,14 @@ def rank_option_contracts(
         ],
         [True, True],
         default=False,
-    ).astype(bool)
+    ).astype(bool) & ranked["surface_numerical_pass"]
     ranked["surface_context_status"] = np.select(
         [
             ranked["iv_percentile"].isna(),
+            ~ranked["surface_numerical_pass"],
             ranked["surface_context_pass"],
         ],
-        ["historical bucket unavailable", "confirmed relative to historical bucket"],
+        ["historical bucket unavailable", "SVI outlier/static-arbitrage diagnostic failed", "confirmed relative to historical bucket"],
         default="not extreme versus historical bucket",
     )
     ranked["abs_price_edge"] = ranked["price_edge"].abs()
@@ -1081,6 +1264,7 @@ def rank_option_contracts(
         "theta", "vega", "rho", "american_delta", "american_gamma", "spread", "spread_pct",
         "volume", "open_interest", "model_used", "model_reason", "model_confidence",
         "pricing_warning", "data_quality_warning", "forecast_model_used", "lambda_used", "weights_used",
+        "parameters_used",
     ]
     extras = [
         "forecast_as_of", "forecast_horizon", "spot", "rate", "dividend", "option_style",
@@ -1090,18 +1274,26 @@ def rank_option_contracts(
         "dollar_gamma", "gamma_weighted_edge", "vega_normalized_edge",
         "gamma_weighted_edge_contract", "contract_multiplier", "candidate_side",
         "moneyness", "log_moneyness", "moneyness_bucket", "dte_bucket", "atm_iv",
+        "spot_log_moneyness", "forward_price", "atm_iv_source",
         "contract_iv_minus_atm_iv", "iv_skew_slope_per_10pct_moneyness",
         "atm_iv_1d", "atm_iv_2d", "atm_iv_5d", "atm_iv_10d",
         "term_spread_2d_minus_1d", "term_spread_5d_minus_2d", "term_spread_10d_minus_5d",
         "iv_percentile", "iv_percentile_observations", "historical_bucket_iv_median",
         "iv_minus_historical_bucket_median", "surface_context_pass", "surface_context_status",
+        "surface_numerical_pass", "svi_status", "svi_fitted_iv", "svi_residual_iv",
+        "svi_robust_weight", "svi_outlier", "svi_a", "svi_b", "svi_rho", "svi_m", "svi_sigma",
+        "svi_rmse_total_variance", "svi_minimum_butterfly_g", "svi_butterfly_arbitrage_free",
+        "svi_parameter_constraints_satisfied", "svi_calendar_arbitrage_free",
+        "svi_calendar_min_total_variance_change",
         "black_scholes_no_dividend_market_iv_fair_value", "binomial_market_iv_fair_value",
         "trinomial_market_iv_fair_value", "approximation_market_iv_fair_value",
         "binomial_forecast_vol_fair_value", "trinomial_forecast_vol_fair_value",
         "approximation_forecast_vol_fair_value", "binomial_american_iv", "trinomial_american_iv",
         "selected_model_iv", "iv_solver_status", "iv_solver_warning", "tree_early_exercise_premium",
         "tree_model_difference", "tree_convergence_status", "price_edge", "model_fair_value",
-        "tree_steps_used", "black_scholes_runtime_ms", "binomial_runtime_ms",
+        "tree_steps_used", "tree_max_steps", "tree_convergence_error", "tree_convergence_tolerance",
+        "tree_numerical_method", "tree_convergence_history", "dividend_model",
+        "cash_dividend_present_value", "discrete_dividend_count", "black_scholes_runtime_ms", "binomial_runtime_ms",
         "trinomial_runtime_ms", "approximation_runtime_ms", "selected_model_runtime_ms",
         "market_iv_fair_value", "forecast_vol",
     ]
@@ -1126,6 +1318,7 @@ def latest_forecast_payload(
             "model_used": str(row.model_used),
             "lambda_used": None if pd.isna(row.lambda_used) else float(row.lambda_used),
             "weights_used": row.weights_used if isinstance(row.weights_used, dict) else None,
+            "parameters_used": row.parameters_used if isinstance(row.parameters_used, dict) else None,
         })
     return {
         "schema": "volatility_forecast.v1",
@@ -1143,6 +1336,8 @@ def json_safe_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
     copy = frame.copy()
     for column in copy.columns:
-        if copy[column].map(lambda value: isinstance(value, dict)).any():
-            copy[column] = copy[column].map(lambda value: json.dumps(value, sort_keys=True) if isinstance(value, dict) else value)
+        if copy[column].map(lambda value: isinstance(value, (dict, list))).any():
+            copy[column] = copy[column].map(
+                lambda value: json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value
+            )
     return copy

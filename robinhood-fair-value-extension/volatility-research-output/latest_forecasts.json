@@ -1,6 +1,6 @@
 {
   "schema": "volatility_forecast.v1",
-  "generated_at": "2026-08-11T21:29:49.131185+00:00",
+  "generated_at": "2026-08-13T15:41:29.785806+00:00",
   "volatility_unit": "annualized_percent",
   "variance_unit": "annualized_decimal_squared",
   "horizons": [
@@ -13,48 +13,93 @@
   "records": [
     {
       "ticker": "SPY",
-      "as_of_date": "2026-08-04",
-      "horizon": 5,
-      "forecast_vol": 11.66128237590206,
-      "model_used": "har_rv",
-      "lambda_used": null,
-      "weights_used": null
-    },
-    {
-      "ticker": "SPY",
-      "as_of_date": "2026-08-04",
-      "horizon": 1,
-      "forecast_vol": 17.798543133895006,
-      "model_used": "ewma",
-      "lambda_used": 0.879,
-      "weights_used": null
-    },
-    {
-      "ticker": "SPY",
-      "as_of_date": "2026-08-04",
-      "horizon": 2,
-      "forecast_vol": 20.136994466358146,
-      "model_used": "ewma",
-      "lambda_used": 0.8,
-      "weights_used": null
-    },
-    {
-      "ticker": "SPY",
-      "as_of_date": "2026-08-04",
+      "as_of_date": "2026-08-11",
       "horizon": 3,
-      "forecast_vol": 20.33504712725346,
-      "model_used": "ewma",
-      "lambda_used": 0.792,
-      "weights_used": null
+      "forecast_vol": 12.06733734944219,
+      "model_used": "gjr_garch",
+      "lambda_used": null,
+      "weights_used": null,
+      "parameters_used": {
+        "alpha": 0.02,
+        "beta": 0.85,
+        "gamma": 0.16,
+        "persistence": 0.95,
+        "omega": 4.605954215034469e-06,
+        "long_run_variance": 9.21190843006893e-05,
+        "next_variance": 5.601063234438756e-05,
+        "qml_loss": -8.594454787959924,
+        "n_train": 756
+      }
     },
     {
       "ticker": "SPY",
-      "as_of_date": "2026-08-04",
+      "as_of_date": "2026-08-11",
+      "horizon": 5,
+      "forecast_vol": 12.23937977705316,
+      "model_used": "gjr_garch",
+      "lambda_used": null,
+      "weights_used": null,
+      "parameters_used": {
+        "alpha": 0.02,
+        "beta": 0.85,
+        "gamma": 0.16,
+        "persistence": 0.95,
+        "omega": 4.605954215034469e-06,
+        "long_run_variance": 9.21190843006893e-05,
+        "next_variance": 5.601063234438756e-05,
+        "qml_loss": -8.594454787959924,
+        "n_train": 756
+      }
+    },
+    {
+      "ticker": "SPY",
+      "as_of_date": "2026-08-11",
+      "horizon": 1,
+      "forecast_vol": 11.88052160083288,
+      "model_used": "gjr_garch",
+      "lambda_used": null,
+      "weights_used": null,
+      "parameters_used": {
+        "alpha": 0.02,
+        "beta": 0.85,
+        "gamma": 0.16,
+        "persistence": 0.95,
+        "omega": 4.605954215034469e-06,
+        "long_run_variance": 9.21190843006893e-05,
+        "next_variance": 5.601063234438756e-05,
+        "qml_loss": -8.594454787959924,
+        "n_train": 756
+      }
+    },
+    {
+      "ticker": "SPY",
+      "as_of_date": "2026-08-11",
+      "horizon": 2,
+      "forecast_vol": 11.975876835585094,
+      "model_used": "gjr_garch",
+      "lambda_used": null,
+      "weights_used": null,
+      "parameters_used": {
+        "alpha": 0.02,
+        "beta": 0.85,
+        "gamma": 0.16,
+        "persistence": 0.95,
+        "omega": 4.605954215034469e-06,
+        "long_run_variance": 9.21190843006893e-05,
+        "next_variance": 5.601063234438756e-05,
+        "qml_loss": -8.594454787959924,
+        "n_train": 756
+      }
+    },
+    {
+      "ticker": "SPY",
+      "as_of_date": "2026-08-11",
       "horizon": 10,
-      "forecast_vol": 12.918733391418014,
+      "forecast_vol": 11.04149783827468,
       "model_used": "har_rv",
       "lambda_used": null,
-      "weights_used": null
+      "weights_used": null,
+      "parameters_used": null
     }
   ],
   "surface_benchmarks": [

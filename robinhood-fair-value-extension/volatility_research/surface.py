@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Iterable
+import math
 
 import numpy as np
 import pandas as pd
@@ -67,11 +68,238 @@ def prepare_surface_contracts(options: pd.DataFrame) -> pd.DataFrame:
     local["expiration"] = pd.to_datetime(local["expiration"], errors="coerce").dt.normalize()
     local = local.dropna(subset=["strike", "spot", "market_iv", "dte"])
     local = local[(local["strike"] > 0) & (local["spot"] > 0) & (local["market_iv"] > 0)]
-    local["moneyness"] = local["strike"] / local["spot"]
+    for column in ("rate", "dividend", "cash_dividend_present_value"):
+        local[column] = pd.to_numeric(local[column], errors="coerce").fillna(0.0) if column in local else 0.0
+    time_years = local["dte"] / 365.0
+    prepaid_forward_spot = (local["spot"] - local["cash_dividend_present_value"]).clip(lower=1e-8)
+    inferred_forward = prepaid_forward_spot * np.exp((local["rate"] / 100.0) * time_years)
+    if "forward_price" in local:
+        supplied_forward = pd.to_numeric(local["forward_price"], errors="coerce")
+        local["forward_price"] = supplied_forward.where(supplied_forward > 0, inferred_forward)
+    else:
+        local["forward_price"] = inferred_forward * np.exp(-(local["dividend"] / 100.0) * time_years)
+    local["moneyness"] = local["strike"] / local["forward_price"]
+    local["spot_log_moneyness"] = np.log(local["strike"] / local["spot"])
     local["log_moneyness"] = np.log(local["moneyness"])
+    local["total_variance"] = np.square(local["market_iv"] / 100.0) * time_years
     local["moneyness_bucket"] = classify_moneyness(local["log_moneyness"])
     local["dte_bucket"] = local["dte"].map(lambda value: nearest_bucket(value, DTE_BUCKETS))
     return local
+
+
+def svi_total_variance(k: np.ndarray | float, parameters: dict[str, float]) -> np.ndarray:
+    values = np.asarray(k, dtype=float)
+    x = values - parameters["m"]
+    return parameters["a"] + parameters["b"] * (
+        parameters["rho"] * x + np.sqrt(np.square(x) + parameters["sigma"] ** 2)
+    )
+
+
+def svi_variance_derivatives(
+    k: np.ndarray | float,
+    parameters: dict[str, float],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    values = np.asarray(k, dtype=float)
+    x = values - parameters["m"]
+    root = np.sqrt(np.square(x) + parameters["sigma"] ** 2)
+    total = svi_total_variance(values, parameters)
+    first = parameters["b"] * (parameters["rho"] + x / root)
+    second = parameters["b"] * parameters["sigma"] ** 2 / np.power(root, 3)
+    return total, first, second
+
+
+def svi_butterfly_g(k: np.ndarray | float, parameters: dict[str, float]) -> np.ndarray:
+    total, first, second = svi_variance_derivatives(k, parameters)
+    safe_total = np.maximum(total, 1e-12)
+    values = np.asarray(k, dtype=float)
+    return (
+        np.square(1.0 - values * first / (2.0 * safe_total))
+        - np.square(first) / 4.0 * (1.0 / safe_total + 0.25)
+        + second / 2.0
+    )
+
+
+def _svi_linear_parameters(
+    k: np.ndarray,
+    total_variance: np.ndarray,
+    weights: np.ndarray,
+    m: float,
+    sigma: float,
+    rho: float,
+) -> tuple[dict[str, float], np.ndarray, float]:
+    shape = rho * (k - m) + np.sqrt(np.square(k - m) + sigma * sigma)
+    design = np.column_stack([np.ones_like(shape), shape])
+    root_weight = np.sqrt(np.maximum(weights, 1e-12))
+    coefficients, *_ = np.linalg.lstsq(design * root_weight[:, None], total_variance * root_weight, rcond=None)
+    b = max(float(coefficients[1]), 0.0)
+    a = float(np.average(total_variance - b * shape, weights=np.maximum(weights, 1e-12)))
+    minimum_a = -b * sigma * math.sqrt(max(1.0 - rho * rho, 0.0)) + 1e-10
+    a = max(a, minimum_a)
+    parameters = {"a": a, "b": b, "rho": float(rho), "m": float(m), "sigma": float(sigma)}
+    fitted = svi_total_variance(k, parameters)
+    loss = float(np.average(np.square(fitted - total_variance), weights=np.maximum(weights, 1e-12)))
+    return parameters, fitted, loss
+
+
+def fit_svi_slice(
+    log_forward_moneyness: np.ndarray,
+    total_variance: np.ndarray,
+    base_weights: np.ndarray | None = None,
+) -> dict[str, object]:
+    """Fit raw SVI with deterministic robust weighting and static-arbitrage diagnostics."""
+
+    k = np.asarray(log_forward_moneyness, dtype=float)
+    observed = np.asarray(total_variance, dtype=float)
+    valid = np.isfinite(k) & np.isfinite(observed) & (observed > 0)
+    k = k[valid]
+    observed = observed[valid]
+    if base_weights is None:
+        weights = 1.0 / (1.0 + 8.0 * np.abs(k))
+    else:
+        weights = np.asarray(base_weights, dtype=float)[valid]
+        weights = np.maximum(weights, 1e-8) / (1.0 + 8.0 * np.abs(k))
+    if k.size < 5 or np.unique(np.round(k, 8)).size < 5:
+        return {"status": "insufficient_points", "parameters": None, "observations": int(k.size)}
+
+    k_range = max(float(np.ptp(k)), 0.05)
+    m_values = np.linspace(float(k.min() - 0.35 * k_range), float(k.max() + 0.35 * k_range), 13)
+    sigma_values = np.geomspace(0.005, max(0.50, 2.0 * k_range), 12)
+    rho_values = np.linspace(-0.95, 0.95, 17)
+    best: tuple[float, dict[str, float], np.ndarray] | None = None
+
+    def search(local_weights: np.ndarray, m_grid: np.ndarray, sigma_grid: np.ndarray, rho_grid: np.ndarray) -> tuple[float, dict[str, float], np.ndarray]:
+        selected: tuple[float, dict[str, float], np.ndarray] | None = None
+        for m in m_grid:
+            for sigma in sigma_grid:
+                for rho in rho_grid:
+                    parameters, fitted, loss = _svi_linear_parameters(k, observed, local_weights, float(m), float(sigma), float(rho))
+                    if selected is None or loss < selected[0]:
+                        selected = (loss, parameters, fitted)
+        assert selected is not None
+        return selected
+
+    robust_weights = weights.copy()
+    for _ in range(3):
+        best = search(robust_weights, m_values, sigma_values, rho_values)
+        residual = observed - best[2]
+        scale = max(1.4826 * float(np.median(np.abs(residual - np.median(residual)))), 1e-8)
+        huber = np.minimum(1.0, 1.5 * scale / np.maximum(np.abs(residual), 1e-12))
+        robust_weights = weights * huber
+        center = best[1]
+        m_step = max(k_range / 5.0, 0.005)
+        sigma_step = max(center["sigma"] / 3.0, 0.003)
+        rho_step = 0.12
+        m_values = np.linspace(center["m"] - m_step, center["m"] + m_step, 7)
+        sigma_values = np.linspace(max(0.001, center["sigma"] - sigma_step), center["sigma"] + sigma_step, 7)
+        rho_values = np.linspace(max(-0.999, center["rho"] - rho_step), min(0.999, center["rho"] + rho_step), 7)
+
+    assert best is not None
+    parameters = best[1]
+    fitted = svi_total_variance(k, parameters)
+    residual = observed - fitted
+    scale = max(1.4826 * float(np.median(np.abs(residual - np.median(residual)))), 1e-8)
+    final_robust_weight = np.minimum(1.0, 1.5 * scale / np.maximum(np.abs(residual), 1e-12))
+    grid = np.linspace(min(float(k.min()) - 0.25, -0.75), max(float(k.max()) + 0.25, 0.75), 601)
+    grid_variance = svi_total_variance(grid, parameters)
+    butterfly = svi_butterfly_g(grid, parameters)
+    parameter_minimum_variance = parameters["a"] + parameters["b"] * parameters["sigma"] * math.sqrt(max(1 - parameters["rho"] ** 2, 0))
+    return {
+        "status": "fitted",
+        "parameters": parameters,
+        "observations": int(k.size),
+        "rmse_total_variance": float(np.sqrt(np.mean(np.square(residual)))),
+        "minimum_total_variance": float(np.min(grid_variance)),
+        "minimum_butterfly_g": float(np.min(butterfly)),
+        "parameter_constraint_satisfied": bool(
+            parameters["b"] >= 0 and parameters["sigma"] > 0 and abs(parameters["rho"]) < 1
+            and parameter_minimum_variance >= -1e-10
+        ),
+        "butterfly_arbitrage_free": bool(np.min(grid_variance) > 0 and np.min(butterfly) >= -1e-7),
+        "input_k": k,
+        "fitted_total_variance": fitted,
+        "robust_weights": final_robust_weight,
+        "residual_scale": scale,
+    }
+
+
+def _add_svi_context(local: pd.DataFrame) -> pd.DataFrame:
+    result = local.copy()
+    defaults: dict[str, object] = {
+        "svi_status": "not_fitted",
+        "svi_fitted_iv": np.nan,
+        "svi_residual_iv": np.nan,
+        "svi_robust_weight": np.nan,
+        "svi_outlier": False,
+        "svi_a": np.nan,
+        "svi_b": np.nan,
+        "svi_rho": np.nan,
+        "svi_m": np.nan,
+        "svi_sigma": np.nan,
+        "svi_rmse_total_variance": np.nan,
+        "svi_minimum_butterfly_g": np.nan,
+        "svi_butterfly_arbitrage_free": False,
+        "svi_parameter_constraints_satisfied": False,
+        "svi_calendar_arbitrage_free": True,
+        "svi_calendar_min_total_variance_change": np.nan,
+    }
+    for column, value in defaults.items():
+        result[column] = value
+
+    fits: dict[tuple[str, pd.Timestamp, pd.Timestamp], dict[str, object]] = {}
+    for key, group in result.groupby(["ticker", "date", "expiration"], sort=True):
+        by_strike = group.groupby("strike", as_index=False).agg(
+            log_moneyness=("log_moneyness", "median"),
+            total_variance=("total_variance", "median"),
+            dte=("dte", "median"),
+        )
+        base_weights = 1.0 / (1.0 + 8.0 * np.abs(by_strike["log_moneyness"].to_numpy(dtype=float)))
+        fit = fit_svi_slice(
+            by_strike["log_moneyness"].to_numpy(dtype=float),
+            by_strike["total_variance"].to_numpy(dtype=float),
+            base_weights,
+        )
+        fits[key] = fit
+        indices = group.index
+        result.loc[indices, "svi_status"] = str(fit["status"])
+        if fit.get("parameters") is None:
+            continue
+        parameters = fit["parameters"]
+        time_years = np.maximum(result.loc[indices, "dte"].to_numpy(dtype=float) / 365.0, 1e-12)
+        fitted_variance = svi_total_variance(result.loc[indices, "log_moneyness"].to_numpy(dtype=float), parameters)
+        fitted_iv = np.sqrt(np.maximum(fitted_variance, 0.0) / time_years) * 100.0
+        result.loc[indices, "svi_fitted_iv"] = fitted_iv
+        result.loc[indices, "svi_residual_iv"] = result.loc[indices, "market_iv"].to_numpy(dtype=float) - fitted_iv
+        scale_iv = max(1.4826 * float(np.median(np.abs(result.loc[indices, "svi_residual_iv"] - result.loc[indices, "svi_residual_iv"].median()))), 0.05)
+        result.loc[indices, "svi_robust_weight"] = np.minimum(1.0, 1.5 * scale_iv / np.maximum(np.abs(result.loc[indices, "svi_residual_iv"]), 1e-12))
+        result.loc[indices, "svi_outlier"] = np.abs(result.loc[indices, "svi_residual_iv"]) > 3.5 * scale_iv
+        for name in ("a", "b", "rho", "m", "sigma"):
+            result.loc[indices, f"svi_{name}"] = parameters[name]
+        result.loc[indices, "svi_rmse_total_variance"] = fit["rmse_total_variance"]
+        result.loc[indices, "svi_minimum_butterfly_g"] = fit["minimum_butterfly_g"]
+        result.loc[indices, "svi_butterfly_arbitrage_free"] = fit["butterfly_arbitrage_free"]
+        result.loc[indices, "svi_parameter_constraints_satisfied"] = fit["parameter_constraint_satisfied"]
+
+    for (ticker, date), expirations in result.groupby(["ticker", "date"], sort=True):
+        ordered = expirations[["expiration", "dte"]].drop_duplicates().sort_values("dte")
+        previous_fit: dict[str, object] | None = None
+        previous_expiration: pd.Timestamp | None = None
+        for row in ordered.itertuples(index=False):
+            key = (ticker, date, row.expiration)
+            current_fit = fits.get(key)
+            if current_fit is None or current_fit.get("parameters") is None:
+                previous_fit, previous_expiration = current_fit, row.expiration
+                continue
+            if previous_fit is not None and previous_fit.get("parameters") is not None:
+                grid = np.linspace(-0.50, 0.50, 401)
+                change = svi_total_variance(grid, current_fit["parameters"]) - svi_total_variance(grid, previous_fit["parameters"])
+                minimum_change = float(np.min(change))
+                indices = result.index[
+                    (result["ticker"] == ticker) & (result["date"] == date) & (result["expiration"] == row.expiration)
+                ]
+                result.loc[indices, "svi_calendar_min_total_variance_change"] = minimum_change
+                result.loc[indices, "svi_calendar_arbitrage_free"] = minimum_change >= -1e-7
+            previous_fit, previous_expiration = current_fit, row.expiration
+    return result
 
 
 def _expiration_statistics(local: pd.DataFrame) -> pd.DataFrame:
@@ -86,6 +314,13 @@ def _expiration_statistics(local: pd.DataFrame) -> pd.DataFrame:
         distance = by_strike["log_moneyness"].abs()
         minimum = float(distance.min())
         atm_iv = float(by_strike.loc[distance <= minimum + 0.0025, "market_iv"].median())
+        svi_status = str(group["svi_status"].iloc[0]) if "svi_status" in group else "not_fitted"
+        if svi_status == "fitted":
+            parameters = {name: float(group[f"svi_{name}"].iloc[0]) for name in ("a", "b", "rho", "m", "sigma")}
+            time_years = max(float(by_strike["dte"].median()) / 365.0, 1e-12)
+            svi_atm_variance = float(svi_total_variance(0.0, parameters))
+            if svi_atm_variance > 0:
+                atm_iv = math.sqrt(svi_atm_variance / time_years) * 100.0
         slope = np.nan
         if len(by_strike) >= 3 and by_strike["log_moneyness"].nunique() >= 3:
             slope = float(np.polyfit(by_strike["log_moneyness"], by_strike["market_iv"], 1)[0] * 0.10)
@@ -94,6 +329,7 @@ def _expiration_statistics(local: pd.DataFrame) -> pd.DataFrame:
             "atm_iv": atm_iv,
             "iv_skew_slope_per_10pct_moneyness": slope,
             "expiration_dte": float(by_strike["dte"].median()),
+            "atm_iv_source": "svi_forward_atm" if svi_status == "fitted" else "nearest_forward_strike",
         })
     return pd.DataFrame(rows)
 
@@ -123,7 +359,7 @@ def add_volatility_surface_context(
 ) -> pd.DataFrame:
     """Add current smile/term context and strictly prior bucket IV percentiles."""
 
-    local = prepare_surface_contracts(options)
+    local = _add_svi_context(prepare_surface_contracts(options))
     expiration_stats = _expiration_statistics(local)
     local = local.merge(expiration_stats, on=["ticker", "date", "expiration"], how="left")
     local["contract_iv_minus_atm_iv"] = local["market_iv"] - local["atm_iv"]

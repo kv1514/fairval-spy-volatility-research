@@ -10,7 +10,13 @@ from .engine import (
     rank_option_contracts,
     threshold_sensitivity_study,
 )
-from .surface import add_volatility_surface_context
+from .surface import (
+    add_volatility_surface_context,
+    fit_svi_slice,
+    prepare_surface_contracts,
+    svi_butterfly_g,
+    svi_total_variance,
+)
 from .pricing_models import (
     BaroneAdesiWhaleyModel,
     BlackScholesModel,
@@ -18,16 +24,22 @@ from .pricing_models import (
     IVResult,
     PricingInputs,
     TrinomialModel,
+    adaptive_crr,
     contract_pricing_diagnostics,
     convergence_report,
     implied_volatility,
     resolve_contract_style,
+    smoothed_crr_result,
 )
 
 __all__ = [
     "ForecastConfig",
     "VolatilityResearchEngine",
     "add_volatility_surface_context",
+    "fit_svi_slice",
+    "prepare_surface_contracts",
+    "svi_butterfly_g",
+    "svi_total_variance",
     "diagnose_models_by_moneyness",
     "evaluate_forecasts",
     "format_blend_formula",
@@ -40,8 +52,10 @@ __all__ = [
     "IVResult",
     "PricingInputs",
     "TrinomialModel",
+    "adaptive_crr",
     "contract_pricing_diagnostics",
     "convergence_report",
     "implied_volatility",
     "resolve_contract_style",
+    "smoothed_crr_result",
 ]

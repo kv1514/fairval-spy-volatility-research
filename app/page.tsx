@@ -234,7 +234,8 @@ export default function Home() {
       marketMid,
       marketIv: selected.iv ?? inputs.volatility,
       forecastVolatility: inputs.volatility,
-      treeSteps: 75,
+      treeSteps: 400,
+      treeTolerance: 0.0025,
     });
   }, [inputs, marketMid, modelAvailable, optionType, selected, symbol]);
   const fairValue = pricingComparison?.selectedFairValue ?? null;
@@ -501,7 +502,7 @@ export default function Home() {
           </div>
 
           <div className="fair-value-block">
-            <span>SELECTED FORECAST-VOL MODEL VALUE</span>
+            <span>{ivMode === "manual" ? "REALIZED-VOLATILITY SCENARIO VALUE" : "MARKET-IV DIAGNOSTIC VALUE"}</span>
             <strong>{fairValue == null ? "—" : money.format(fairValue)}</strong>
             <small>{fairValue == null ? (selected ? "Market IV unavailable—use Manual IV" : "Select a live contract") : `${money.format(fairValue * 100)} per 100-share contract`}</small>
           </div>
@@ -512,8 +513,11 @@ export default function Home() {
               <div><span>BS / FORECAST VOL</span><strong>{money.format(pricingComparison.bsForecastFairValue)}</strong></div>
               <div><span>AMERICAN CRR / FORECAST VOL</span><strong>{pricingComparison.americanForecastFairValue == null ? "N/A" : money.format(pricingComparison.americanForecastFairValue)}</strong></div>
               <div><span>EARLY-EXERCISE PREMIUM</span><strong>{money.format(pricingComparison.earlyExercisePremium)}</strong></div>
+              <div><span>ADAPTIVE CRR</span><strong>{pricingComparison.treeConvergenceStatus}{pricingComparison.treeStepsUsed ? ` · N=${pricingComparison.treeStepsUsed}` : ""}</strong></div>
+              <div><span>LAST ERROR / TOLERANCE</span><strong>{pricingComparison.treeConvergenceError == null ? "N/A" : `${money.format(pricingComparison.treeConvergenceError)} / ${money.format(pricingComparison.treeConvergenceTolerance)}`}</strong></div>
               <p><strong>{pricingComparison.modelReason}</strong> {pricingComparison.pricingWarning}</p>
               {ivMode === "market" && <p className="circular-note">Market-IV value is a diagnostic and will usually reproduce the market. Switch to Manual only when the input is your independent volatility forecast.</p>}
+              {ivMode === "manual" && <p className="circular-note">A realized-volatility forecast is a physical-measure scenario input. It is not, by itself, a uniquely identified risk-neutral fair value.</p>}
             </div>
           )}
 
@@ -580,14 +584,14 @@ export default function Home() {
         <div className="method-grid">
           <div><span>01</span><strong>Same contract</strong><p>Match symbol, call or put, expiration, strike, and quote timestamp before comparing with Robinhood.</p></div>
           <div><span>02</span><strong>Same feed quality</strong><p>OPRA is the consolidated options market. Alpaca Basic indicative prices are modified and can differ.</p></div>
-          <div><span>03</span><strong>Model—not market mark</strong><p>Forecast volatility drives the research value. Market-IV value is circular; American trees add an early-exercise diagnostic.</p></div>
+          <div><span>03</span><strong>Keep P and Q separate</strong><p>Market-IV value is circular. A realized-volatility input creates a scenario value; adaptive American trees control numerical error and early exercise.</p></div>
         </div>
       </section>
 
       <footer>
         <div>
           <strong>FairVal Multi-Model Lab</strong>
-          <p>European Black–Scholes baseline, American CRR/trinomial comparison, continuous-dividend approximation, and no order execution.</p>
+          <p>European Black–Scholes baseline, convergence-checked American CRR/trinomial comparison, continuous-dividend approximation, and no order execution.</p>
         </div>
         <p className="disclaimer">EDUCATIONAL ANALYTICS · NOT INVESTMENT ADVICE</p>
       </footer>

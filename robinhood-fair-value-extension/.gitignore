@@ -4,5 +4,8 @@ __pycache__/
 volatility-research-output/forecasts.csv
 volatility-research-output/ewma_lambda_performance.csv
 volatility-research-output/blend_weights_history.csv
+volatility-research-output/ensemble_weights_history.csv
+volatility-research-output/garch_parameters_history.csv
 volatility-research-output/model_selection_history.csv
 volatility-research-output/variance_diagnostics_report.png
+volatility-research-output/*-qa.png

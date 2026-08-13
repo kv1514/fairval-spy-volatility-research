@@ -25,6 +25,7 @@ from .visualizations import write_visualizations
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Walk-forward volatility forecasts and option mispricing research")
     parser.add_argument("--prices", required=True, help="CSV with ticker,date,close")
+    parser.add_argument("--ticker", default="SPY", help="Ticker to research (default SPY); use ALL for every ticker")
     parser.add_argument("--options", help="Optional CSV of dated option quotes")
     parser.add_argument("--surface-history", help="Optional historical option IV CSV for DTE/moneyness percentiles")
     parser.add_argument("--output-dir", default="volatility-research-output")
@@ -33,6 +34,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--rebalance-every", type=int, default=5)
     parser.add_argument("--min-volume", type=float, default=10)
     parser.add_argument("--min-open-interest", type=float, default=100)
+    parser.add_argument("--tree-max-steps", type=int, default=400, help="Maximum adaptive CRR base steps")
+    parser.add_argument("--tree-tolerance", type=float, default=0.0025, help="Absolute dollar CRR convergence tolerance")
     return parser
 
 
@@ -40,6 +43,11 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     prices = pd.read_csv(args.prices)
+    requested_ticker = str(getattr(args, "ticker", "SPY") or "SPY").upper().strip()
+    if requested_ticker != "ALL":
+        prices = prices[prices["ticker"].astype(str).str.upper().str.strip() == requested_ticker].copy()
+        if prices.empty:
+            raise ValueError(f"no price rows found for ticker {requested_ticker}")
     config = ForecastConfig(
         min_train_observations=args.min_train,
         training_window=None if args.training_window == 0 else args.training_window,
@@ -57,6 +65,8 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
         surface_history=surface_history,
         minimum_volume=args.min_volume,
         minimum_open_interest=args.min_open_interest,
+        tree_steps=max(int(args.tree_max_steps), 100),
+        tree_tolerance=max(float(args.tree_tolerance), 0.0001),
     ) if not options.empty else pd.DataFrame()
     diagnostics = diagnose_models_by_moneyness(
         forecasts,
@@ -79,6 +89,8 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
         "rankings": output / "option_rankings.csv",
         "lambda_curve": output / "ewma_lambda_performance.csv",
         "weights": output / "blend_weights_history.csv",
+        "ensemble_weights": output / "ensemble_weights_history.csv",
+        "garch_parameters": output / "garch_parameters_history.csv",
         "model_selection": output / "model_selection_history.csv",
         "diagnostics": output / "model_diagnostics.csv",
         "threshold_study": output / "threshold_study.csv",
@@ -91,6 +103,8 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     json_safe_frame(rankings).to_csv(paths["rankings"], index=False)
     json_safe_frame(engine.lambda_performance_).to_csv(paths["lambda_curve"], index=False)
     json_safe_frame(engine.weights_history_).to_csv(paths["weights"], index=False)
+    json_safe_frame(engine.ensemble_weights_history_).to_csv(paths["ensemble_weights"], index=False)
+    json_safe_frame(engine.garch_parameters_).to_csv(paths["garch_parameters"], index=False)
     json_safe_frame(engine.model_selection_history_).to_csv(paths["model_selection"], index=False)
     diagnostics.to_csv(paths["diagnostics"], index=False)
     threshold_study.to_csv(paths["threshold_study"], index=False)

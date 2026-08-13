@@ -10,6 +10,10 @@ const bundledForecast = JSON.parse(await readFile(
   new URL("../volatility-research-output/latest_forecasts.json", import.meta.url),
   "utf8",
 ));
+const pricingGoldenVectors = JSON.parse(await readFile(
+  new URL("./fixtures/pricing-golden-vectors.json", import.meta.url),
+  "utf8",
+));
 const context = vm.createContext({
   Date,
   Intl,
@@ -83,6 +87,78 @@ test("model selection uses same-tree exercise premium, not lattice error", () =>
   const deepPut = pricing.compareModels({ ticker: "AAPL", spot: 80, strike: 100, days: 365, volatility: 20, marketIv: 20, forecastVolatility: 20, marketMid: 20.5, rate: 8, dividend: 0, optionType: "put", treeSteps: 150 });
   assert.ok(deepPut.sameTreeExercisePremium > 0.01);
   assert.equal(deepPut.modelUsed, "binomial_american_crr");
+});
+
+test("adaptive CRR step-doubles, smooths lattice oscillation, and reports its error", () => {
+  const input = { spot: 100, strike: 105, days: 45, volatility: 27, rate: 4, dividend: 1, optionType: "put", exerciseStyle: "american" };
+  const adaptive = pricing.adaptiveCrr(input, { minSteps: 50, maxSteps: 400, tolerance: 0.0025, american: true });
+  const reference = pricing.crrSmoothedAtSteps(input, { steps: 800, american: true }).price;
+  assert.equal(adaptive.converged, true);
+  assert.equal(adaptive.status, "converged");
+  assert.ok(adaptive.history.length >= 3);
+  assert.ok(adaptive.errorEstimate <= adaptive.tolerance);
+  assert.ok(adaptive.steps <= adaptive.maxSteps);
+  assert.ok(Math.abs(adaptive.price - reference) < 0.003);
+});
+
+test("JavaScript pricing matches the shared cross-language golden vectors", () => {
+  for (const vector of pricingGoldenVectors) {
+    const adaptive = pricing.adaptiveCrr(vector.inputs, {
+      minSteps: 50,
+      maxSteps: 400,
+      tolerance: 0.0025,
+      american: true,
+    });
+    assert.ok(Math.abs(adaptive.price - vector.adaptivePrice) < 1e-9, vector.name);
+    assert.ok(Math.abs(pricing.blackScholes(vector.inputs).price - vector.blackScholesPrice) < 1e-10, vector.name);
+    assert.equal(adaptive.steps, vector.stepsUsed, vector.name);
+  }
+});
+
+test("American model selection falls back explicitly when the adaptive tree cannot converge", () => {
+  const result = pricing.compareModels({
+    ticker: "SPY", spot: 80, strike: 100, days: 365, marketIv: 20,
+    forecastVolatility: 20, marketMid: 20.5, rate: 8, dividend: 0,
+    optionType: "put", treeSteps: 100, treeTolerance: 0.000001,
+  });
+  assert.equal(result.treeConverged, false);
+  assert.equal(result.treeConvergenceStatus, "max_steps_reached");
+  assert.equal(result.modelUsed, "black_scholes_dividend_adjusted");
+  assert.match(result.pricingWarning, /did not converge/);
+});
+
+test("adaptive American values respect bounds and strike monotonicity", () => {
+  const base = { spot: 100, days: 30, volatility: 25, rate: 4, dividend: 1, exerciseStyle: "american" };
+  const call90 = pricing.adaptiveCrr({ ...base, strike: 90, optionType: "call" }).price;
+  const call100 = pricing.adaptiveCrr({ ...base, strike: 100, optionType: "call" }).price;
+  const put90 = pricing.adaptiveCrr({ ...base, strike: 90, optionType: "put" }).price;
+  const put100 = pricing.adaptiveCrr({ ...base, strike: 100, optionType: "put" }).price;
+  assert.ok(call90 >= call100 && call90 <= base.spot);
+  assert.ok(put100 >= put90 && put100 <= 100);
+  assert.ok(call90 >= Math.max(base.spot - 90, 0));
+  assert.ok(put100 >= Math.max(100 - base.spot, 0));
+});
+
+test("adaptive American values are monotone in maturity without dividends", () => {
+  const base = { spot: 100, strike: 100, volatility: 25, rate: 4, dividend: 0, exerciseStyle: "american" };
+  for (const optionType of ["call", "put"]) {
+    const short = pricing.adaptiveCrr({ ...base, days: 10, optionType }).price;
+    const long = pricing.adaptiveCrr({ ...base, days: 60, optionType }).price;
+    assert.ok(long >= short - 1e-8, optionType);
+  }
+});
+
+test("discrete cash dividends flow through BS, CRR, trinomial, and early exercise", () => {
+  const base = { spot: 100, strike: 95, days: 45, volatility: 22, rate: 4, dividend: 0, optionType: "call", exerciseStyle: "american" };
+  const noDividend = pricing.adaptiveCrr(base).price;
+  const withDividend = { ...base, discreteDividends: [{ days: 20, amount: 2.5 }] };
+  const crrValue = pricing.adaptiveCrr(withDividend).price;
+  const triValue = pricing.trinomial(withDividend, { steps: 400, american: true }).price;
+  assert.ok(crrValue < noDividend);
+  assert.ok(Math.abs(crrValue - triValue) < 0.03);
+  assert.ok(pricing.crr(withDividend, { steps: 400, american: true }).price >= pricing.crr(withDividend, { steps: 400, american: false }).price);
+  assert.equal(pricing.blackScholes(withDividend).dividendModel, "escrowed_cash_dividend_adjustment");
+  assert.throws(() => pricing.baw(withDividend), /does not support discrete cash dividends/);
 });
 
 test("matches the standard Black-Scholes reference result", () => {
@@ -302,9 +378,62 @@ test("robust smile fit resists a corrupted neighboring IV quote", () => {
   assert.ok(Math.abs(iv - 20) < 1);
 });
 
+test("live SVI fits total variance on forward moneyness with butterfly diagnostics", () => {
+  const parameters = { a: 0.002, b: 0.03, rho: -0.35, m: 0.01, sigma: 0.18 };
+  const days = 30;
+  const T = days / 365;
+  const spot = 100;
+  const rate = 4;
+  const forward = spot * Math.exp((rate / 100) * T);
+  const observations = Array.from({ length: 13 }, (_, index) => {
+    const k = -0.24 + index * 0.04;
+    const totalVariance = pricing.sviTotalVariance
+      ? pricing.sviTotalVariance(k, parameters)
+      : core.sviTotalVariance(k, parameters);
+    return {
+      strike: forward * Math.exp(k),
+      iv: Math.sqrt(totalVariance / T) * 100 + (index === 2 ? 6 : 0),
+    };
+  });
+  const fit = core.fitSviSmile(observations, { spot, days, rate, dividend: 0 });
+  assert.equal(fit.status, "fitted");
+  assert.equal(fit.butterflyArbitrageFree, true);
+  assert.ok(Number.isFinite(fit.ivAtLogMoneyness(0)));
+  assert.ok(Math.abs(fit.forward - forward) < 1e-10);
+});
+
 test("uses the New York option close for intraday expiry", () => {
   const days = core.daysToExpiration("2026-08-04", Date.parse("2026-08-04T20:00:00Z"));
   assert.ok(Math.abs(days - 15 / 1440) < 1e-9);
+});
+
+test("distinguishes AM-settled SPX from PM-settled SPXW and ETF options", () => {
+  assert.equal(core.settlementMinutesForSeries("SPX"), 9 * 60 + 30);
+  assert.equal(core.settlementMinutesForSeries("SPXW"), 16 * 60);
+  assert.equal(core.settlementMinutesForSeries("XSP"), 16 * 60);
+  assert.equal(core.settlementMinutesForSeries("SPY"), 16 * 60 + 15);
+  const expiration = "2026-08-21";
+  const now = Date.parse("2026-08-20T20:00:00Z");
+  assert.ok(
+    core.daysToExpiration(expiration, now, core.settlementMinutesForSeries("SPX"))
+      < core.daysToExpiration(expiration, now, core.settlementMinutesForSeries("SPXW")),
+  );
+});
+
+test("pricing cache key is stable within a minute and includes numerical controls", () => {
+  const common = {
+    ticker: "SPY", optionType: "call", expiration: "2026-08-14", spot: 775.12,
+    strike: 775, fairIv: 18.2344, marketIv: 17.951, referencePrice: 2.35,
+    rate: 4.2, dividend: 1.1, treeSteps: 400, treeTolerance: 0.0025,
+    exactQuote: true,
+  };
+  const first = core.buildPricingCacheKey({ ...common, days: 2.50060 });
+  const sameMinute = core.buildPricingCacheKey({ ...common, days: 2.50055 });
+  const priorMinute = core.buildPricingCacheKey({ ...common, days: 2.49980 });
+  const stricter = core.buildPricingCacheKey({ ...common, days: 2.50060, treeTolerance: 0.001 });
+  assert.equal(first, sameMinute);
+  assert.notEqual(first, priorMinute);
+  assert.notEqual(first, stricter);
 });
 
 test("recovers a different implied volatility for each option quote", () => {
@@ -461,6 +590,10 @@ test("parses and interpolates the latest official Treasury curve", () => {
   assert.equal(curve.points[0].rate, 3.78);
   const rate = core.interpolateTreasuryRate(curve.points, 60);
   assert.ok(rate > 3.78 && rate < 3.89);
+  const zeroProxy = core.continuousTreasuryZeroProxy(curve.points);
+  assert.equal(zeroProxy.length, curve.points.length);
+  assert.ok(zeroProxy.every((point) => Number.isFinite(point.rate) && point.rate > 0));
+  assert.notEqual(zeroProxy[0].rate, curve.points[0].rate);
 });
 
 test("uses expiration-aware ETF dividends and a continuous SPX yield", () => {
@@ -476,7 +609,10 @@ test("uses expiration-aware ETF dividends and a continuous SPX yield", () => {
   });
   assert.equal(shortSpy.yield, 0);
   assert.equal(quarterlySpy.count, 1);
-  assert.ok(quarterlySpy.yield > 0);
+  assert.equal(quarterlySpy.yield, 0);
+  assert.ok(quarterlySpy.equivalentYield > 0);
+  assert.equal(quarterlySpy.discreteDividends.length, 1);
+  assert.ok(quarterlySpy.discreteDividends[0].amount > 0);
   assert.equal(spx.yield, 1.12);
 });
 

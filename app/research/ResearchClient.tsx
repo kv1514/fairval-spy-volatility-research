@@ -145,7 +145,8 @@ function PricePathChart({ candidate }: { candidate: Candidate }) {
   useEffect(() => {
     const canvas = canvasRef.current;
     const path = candidate.trajectory ?? [];
-    if (!canvas || !path.length || candidate.entryPrice == null) return;
+    const entryPrice = candidate.entryPrice;
+    if (!canvas || !path.length || entryPrice == null) return;
     const draw = () => {
       const rect = canvas.getBoundingClientRect();
       const scale = window.devicePixelRatio || 1;
@@ -158,7 +159,7 @@ function PricePathChart({ candidate }: { candidate: Candidate }) {
       const height = rect.height;
       const padding = { top: 24, right: 20, bottom: 28, left: 50 };
       const values = path.flatMap((point) => [point.close, point.high]);
-      values.push(candidate.fairValue, candidate.entryPrice ?? 0);
+      values.push(candidate.fairValue, entryPrice);
       const minimum = Math.max(0, Math.min(...values) * 0.88);
       const maximum = Math.max(...values) * 1.08;
       const x = (index: number) => padding.left + (index / Math.max(path.length - 1, 1)) * (width - padding.left - padding.right);
@@ -189,8 +190,8 @@ function PricePathChart({ candidate }: { candidate: Candidate }) {
 
       context.strokeStyle = "#9aa9a5";
       context.beginPath();
-      context.moveTo(padding.left, y(candidate.entryPrice));
-      context.lineTo(width - padding.right, y(candidate.entryPrice));
+      context.moveTo(padding.left, y(entryPrice));
+      context.lineTo(width - padding.right, y(entryPrice));
       context.stroke();
       context.setLineDash([]);
 

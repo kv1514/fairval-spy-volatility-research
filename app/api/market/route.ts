@@ -259,6 +259,12 @@ function normalizeTradierContract(raw: Record<string, unknown>): Contract | null
   const strike = numeric(raw.strike);
   if (!type || strike <= 0) return null;
   const rawTradeTime = numeric(raw.trade_date);
+  const root = String(raw.root_symbol ?? raw.underlying ?? "").toUpperCase();
+  const settlementMinutes = root === "SPX"
+    ? 9 * 60 + 30
+    : ["SPXW", "XSP"].includes(root)
+      ? 16 * 60
+      : 16 * 60 + 15;
   return {
     symbol: String(raw.symbol ?? ""),
     type,
@@ -269,9 +275,9 @@ function normalizeTradierContract(raw: Record<string, unknown>): Contract | null
     volume: nullableNumber(raw.volume),
     openInterest: nullableNumber(raw.open_interest),
     iv: normalizeTradierIv(raw.greeks as Record<string, unknown> | undefined),
-    root: String(raw.root_symbol ?? raw.underlying ?? ""),
+    root,
     quoteTime: rawTradeTime > 0 ? new Date(rawTradeTime).toISOString() : null,
-    settlementMinutes: String(raw.root_symbol ?? "").toUpperCase() === "SPX" ? 9 * 60 + 30 : 16 * 60 + 15,
+    settlementMinutes,
   };
 }
 

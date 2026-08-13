@@ -17,6 +17,11 @@ MODEL_COLORS = {
     "optimized_blend": "#147d64",
     "sparse_blend": "#0b7285",
     "ewma": "#3155a4",
+    "har_rv": "#7550ae",
+    "garch_11": "#d9480f",
+    "gjr_garch": "#c2255c",
+    "simple_ensemble": "#5f3dc4",
+    "adaptive_ensemble": "#7048e8",
     "realized_20": "#9a5b13",
     "realized_60": "#783d8f",
 }
@@ -47,9 +52,10 @@ def _all_models_table(diagnostics: pd.DataFrame) -> str:
         rows.append([
             escape(str(row.ticker)), str(int(row.horizon)),
             f'<span class="model-pill" style="--pill:{color}">{escape(str(row.model))}</span>{marker}',
-            f"{int(row.observations):,}", _number(row.mse_variance, 6), _number(row.mae_vol, 4),
+            f"{int(row.observations):,}", _number(row.mse_variance, 6),
+            _number(getattr(row, "mean_qlike", None), 5), _number(row.mae_vol, 4),
         ])
-    return _table(["Ticker", "Horizon", "Candidate model", "OOS n", "Variance MSE", "Vol MAE"], rows)
+    return _table(["Ticker", "Horizon", "Candidate model", "OOS n", "Variance MSE", "QLIKE", "Vol MAE"], rows)
 
 
 def _formula_table(weights_history: pd.DataFrame | None) -> str:
@@ -217,12 +223,12 @@ th:first-child,td:first-child{{text-align:left}}.model-pill{{display:inline-bloc
 <section><div class="grid"><div class="panel"><h2>Best model count</h2><p class="muted">Winner across ticker/horizon aggregate cells, selected only by past out-of-sample variance MSE.</p>{bars}</div>
 <div class="panel"><h2>Interpretation guardrails</h2><ul><li>Variance fields use annualized decimal variance, not squared percentage points.</li><li>High downside-put IV is not an automatic short: the IV percentile must be high versus the same ticker, option type, DTE and moneyness bucket.</li><li>Positive model price edge supports long-option research; positive gamma-weighted edge supports short-vol research.</li><li>Current live quotes are not outcomes. They cannot validate profitability until their future realized window completes.</li></ul></div></div></section>
 <section><h2>Best forecast by ticker and horizon</h2>{aggregate_table}</section>
-<section><h2>All candidate models by ticker and horizon</h2><p class="muted">Every model is scored on the same out-of-sample completed targets. The winner is the lowest variance MSE; alternatives are shown so the margin is visible.</p>{all_models_table}</section>
+<section><h2>All candidate models by ticker and horizon</h2><p class="muted">Every model is scored on the same out-of-sample completed targets. The winner is the lowest variance MSE; QLIKE adds a robust check for noisy realized-variance targets and alternatives show the selection margin.</p>{all_models_table}</section>
 <section><h2>Latest blend formulas</h2><p class="muted">The dense optimized blend spreads variance weight across the candidate windows; the sparse blend keeps only the few windows that earn their place (weights below 1e-8 are dropped).</p>{formula_table}</section>
 <section><h2>Best forecast by moneyness bucket</h2><p class="muted">A bucket changes the set of dates evaluated; it does not make an underlying-volatility forecast strike-specific.</p>{bucket_table}</section>
 <section><h2>Signal reliability by edge threshold</h2><p class="muted">Does a bigger gap between the model forecast and market IV mean a more reliable signal? This sweep answers empirically — it is a forecast-skill diagnostic, not a "safe to buy" threshold.</p>{threshold_section}</section>
 <section><h2>Current research queue</h2><p class="muted">Candidates are prioritized for further review, not recommended trades.</p>{candidates_table}</section>
-<section class="sources"><h2>Sources and limitations</h2><p><strong>Model source:</strong> {escape(source_pdf)}. <strong>Market data:</strong> included Robinhood daily bars, live option quote snapshot, and historical hourly last-trade replay. The replay lacks historical NBBO, so inverted historical IV percentiles are screen-grade rather than execution-grade.</p></section>
+<section class="sources"><h2>Sources and limitations</h2><p><strong>Pricing source:</strong> {escape(source_pdf)}. <strong>Forecast sources:</strong> Bollerslev (1986) GARCH, Glosten-Jagannathan-Runkle (1993) asymmetric GARCH, Corsi (2009) HAR-RV, and Patton (2011) QLIKE evaluation. <strong>Market data:</strong> included Robinhood daily bars, live option quote snapshot, and historical hourly last-trade replay. The replay lacks historical NBBO, so inverted historical IV percentiles are screen-grade rather than execution-grade.</p></section>
 </main></body></html>'''
     target.write_text(html, encoding="utf-8")
     return target
@@ -265,7 +271,18 @@ def write_pricing_diagnostics_report(
             volatility=float(row.forecast_volatility), rate=float(row.rate), dividend=float(row.dividend),
             option_type=option_type, exercise_style="american" if style == "american" else "european",
         )
-        binomial_convergence = convergence_report(CRRBinomialModel, inputs) if style == "american" else []
+        stored_convergence = getattr(row, "tree_convergence_history", None)
+        if style == "american" and isinstance(stored_convergence, list):
+            binomial_convergence = [{
+                **item,
+                "difference_from_previous": item.get("difference_from_previous"),
+                "stabilized": (
+                    item.get("error_estimate") is not None
+                    and item.get("error_estimate") <= float(getattr(row, "tree_convergence_tolerance", 0.0025))
+                ),
+            } for item in stored_convergence]
+        else:
+            binomial_convergence = convergence_report(CRRBinomialModel, inputs) if style == "american" else []
         trinomial_convergence = convergence_report(TrinomialModel, inputs) if style == "american" else []
         record = {
             "id": index,
@@ -307,11 +324,26 @@ def write_pricing_diagnostics_report(
             "modelUsed": str(row.model_used),
             "modelReason": str(row.model_reason),
             "modelConfidence": safe(row.model_confidence),
+            "treeConvergenceStatus": str(getattr(row, "tree_convergence_status", "not_applicable")),
+            "treeConvergenceError": safe(getattr(row, "tree_convergence_error", None)),
+            "treeConvergenceTolerance": safe(getattr(row, "tree_convergence_tolerance", None)),
+            "treeStepsUsed": safe(getattr(row, "tree_steps_used", None)),
+            "treeMaxSteps": safe(getattr(row, "tree_max_steps", None)),
+            "treeNumericalMethod": safe(getattr(row, "tree_numerical_method", None)),
             "blackScholesRuntimeMs": safe(getattr(row, "black_scholes_runtime_ms", None)),
             "binomialRuntimeMs": safe(getattr(row, "binomial_runtime_ms", None)),
             "trinomialRuntimeMs": safe(getattr(row, "trinomial_runtime_ms", None)),
             "approximationRuntimeMs": safe(getattr(row, "approximation_runtime_ms", None)),
             "forecastModel": str(row.forecast_model_used),
+            "forwardPrice": safe(getattr(row, "forward_price", None)),
+            "logForwardMoneyness": safe(getattr(row, "log_moneyness", None)),
+            "sviStatus": str(getattr(row, "svi_status", "not_fitted")),
+            "sviFittedIv": safe(getattr(row, "svi_fitted_iv", None)),
+            "sviResidualIv": safe(getattr(row, "svi_residual_iv", None)),
+            "sviOutlier": bool(getattr(row, "svi_outlier", False)),
+            "sviButterflyFree": bool(getattr(row, "svi_butterfly_arbitrage_free", False)),
+            "sviCalendarFree": bool(getattr(row, "svi_calendar_arbitrage_free", True)),
+            "sviMinButterflyG": safe(getattr(row, "svi_minimum_butterfly_g", None)),
             "pricingWarning": str(row.pricing_warning or ""),
             "dataQualityWarning": str(row.data_quality_warning or ""),
             "binomialConvergence": binomial_convergence,
@@ -338,11 +370,11 @@ section{{margin-top:32px}}h2{{margin:0 0 7px;font-size:22px;letter-spacing:-.03e
 .two-col{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}.legend{{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}}.legend span{{padding:4px 7px;border:1px solid var(--line);background:#fff;font:700 9px ui-monospace,monospace}}.foot{{margin-top:40px;padding-top:22px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}}.foot a{{color:var(--green)}}
 @media(max-width:850px){{header,.hero-grid,.two-col{{grid-template-columns:1fr}}.value-card strong{{font-size:48px}}main{{padding:24px 16px 50px}}}}
 </style></head><body><main>
-<header><div><div class="eyebrow">FAIRVAL / MODEL COMPARISON LAB</div><h1>One quote. Multiple defensible values.</h1><p>European Black–Scholes is the baseline. American CRR and trinomial trees test early exercise. The selected research value uses the independent forecast volatility—not the circular market-IV diagnostic.</p></div>
+<header><div><div class="eyebrow">FAIRVAL / MODEL COMPARISON LAB</div><h1>One quote. Multiple conditional values.</h1><p>European Black–Scholes is the baseline. Adaptive American CRR and trinomial trees test early exercise. A value using forecast realized volatility is a physical-volatility scenario—not a uniquely identified risk-neutral fair value.</p></div>
 <label>Inspect contract<select id="contract"></select></label></header>
 <div id="empty" class="empty" hidden>No ranked contracts were available for this run.</div>
 <div id="report" hidden>
-<div class="hero-grid"><article class="panel value-card"><span class="caption">Selected forecast-volatility value</span><strong id="selectedValue">—</strong><span class="model-tag" id="modelUsed">—</span><p class="reason" id="modelReason"></p></article><div class="metrics" id="metrics"></div></div>
+<div class="hero-grid"><article class="panel value-card"><span class="caption">Selected realized-volatility scenario value</span><strong id="selectedValue">—</strong><span class="model-tag" id="modelUsed">—</span><p class="reason" id="modelReason"></p></article><div class="metrics" id="metrics"></div></div>
 <div id="warning" class="warning"></div>
 <section><h2>Price and volatility bridge</h2><p>Market-IV values explain the quote; forecast-volatility values create the research comparison.</p><div id="priceTable" class="table-wrap"></div></section>
 <section class="two-col"><div><h2>CRR convergence</h2><p>American lattice values across step counts.</p><div id="binomialTable" class="table-wrap"></div></div><div><h2>Trinomial convergence</h2><p>Independent lattice cross-check.</p><div id="trinomialTable" class="table-wrap"></div></div></section>
@@ -354,7 +386,7 @@ const money=v=>v==null?"—":new Intl.NumberFormat("en-US",{{style:"currency",cu
 function table(headers,rows){{return `<table><thead><tr>${{headers.map(x=>`<th>${{esc(x)}}</th>`).join("")}}</tr></thead><tbody>${{rows.map(row=>`<tr>${{row.map(x=>`<td>${{x}}</td>`).join("")}}</tr>`).join("")}}</tbody></table>`}}
 function convergence(rows){{return table(["Steps","Price","Δ previous","Runtime ms","Stable"],(rows||[]).map(x=>[x.steps,money(x.price),x.difference_from_previous==null?"—":num(x.difference_from_previous,5),num(x.runtime_ms,2),x.stabilized?"Yes":"No"]))}}
 function render(index){{const c=contracts[index];if(!c)return;document.getElementById("selectedValue").textContent=money(c.selectedFairValue);document.getElementById("modelUsed").textContent=c.modelUsed;document.getElementById("modelReason").textContent=c.modelReason;
-document.getElementById("metrics").innerHTML=[["Market midpoint",money(c.mid),`Bid ${{money(c.bid)}} / Ask ${{money(c.ask)}}`],["Forecast volatility",`${{num(c.forecastVolatility,2)}}%`,`Market IV ${{num(c.marketIv,2)}}%`],["Early-exercise premium",money(c.earlyExercisePremium),`Exact tree premium ${{money(c.treeExactPremium)}}`],["Model confidence",num(c.modelConfidence,2),`Spread ${{num(c.spreadPct,1)}}%`]].map(x=>`<div class="metric"><span>${{x[0]}}</span><strong>${{x[1]}}</strong><small>${{x[2]}}</small></div>`).join("");
+document.getElementById("metrics").innerHTML=[["Market midpoint",money(c.mid),`Bid ${{money(c.bid)}} / Ask ${{money(c.ask)}}`],["Forecast volatility",`${{num(c.forecastVolatility,2)}}%`,`Market IV ${{num(c.marketIv,2)}}%`],["Adaptive CRR",c.treeConvergenceStatus,`N=${{c.treeStepsUsed??"—"}} · error ${{money(c.treeConvergenceError)}} / tol ${{money(c.treeConvergenceTolerance)}}`],["SVI surface",c.sviStatus,`fit ${{num(c.sviFittedIv,2)}}% · residual ${{num(c.sviResidualIv,2)}}pt · butterfly ${{c.sviButterflyFree?"pass":"fail"}} · calendar ${{c.sviCalendarFree?"pass":"fail"}}`]].map(x=>`<div class="metric"><span>${{x[0]}}</span><strong>${{x[1]}}</strong><small>${{x[2]}}</small></div>`).join("");
 const warning=[c.pricingWarning,c.dataQualityWarning].filter(Boolean).join(" · ");const warningNode=document.getElementById("warning");warningNode.textContent=warning||"No pricing or data-quality warning for this snapshot.";warningNode.className=warning?"warning":"warning ok";
 document.getElementById("priceTable").innerHTML=table(["Model","Market IV value","Forecast-vol value","Midpoint edge","IV from midpoint","Runtime ms"],[["Black–Scholes",money(c.bsMarket),money(c.bsForecast),money(c.priceEdgeBs),`${{num(c.blackScholesIv,2)}}%`,num(c.blackScholesRuntimeMs,3)],["American CRR",money(c.binomialMarket),money(c.binomialForecast),money(c.priceEdgeAmerican),`${{num(c.americanIv,2)}}%`,num(c.binomialRuntimeMs,3)],["American trinomial","—",money(c.trinomialForecast),"—","—",num(c.trinomialRuntimeMs,3)],["BAW approximation","—",money(c.approximationForecast),"—","—",num(c.approximationRuntimeMs,3)]]);
 document.getElementById("binomialTable").innerHTML=convergence(c.binomialConvergence);document.getElementById("trinomialTable").innerHTML=convergence(c.trinomialConvergence)}}

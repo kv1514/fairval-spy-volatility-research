@@ -4,6 +4,12 @@ As of August 5, 2026.
 
 ## Methodology
 
+- [Bollerslev, “Generalized Autoregressive Conditional Heteroskedasticity” (1986)](https://public.econ.duke.edu/~boller/Published_Papers/joe_86.pdf): primary basis for the variance-targeted GARCH(1,1) conditional-variance forecast and Gaussian quasi-likelihood fit.
+- [Glosten, Jagannathan, and Runkle, “On the Relation between the Expected Value and the Volatility of the Nominal Excess Return on Stocks” (1993)](https://doi.org/10.1111/j.1540-6261.1993.tb05128.x): primary basis for allowing negative and positive SPY innovations to affect conditional variance differently in `gjr_garch`.
+- [Corsi, “A Simple Approximate Long-Memory Model of Realized Volatility” (2009)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1365738): basis for the daily/weekly/monthly HAR variance regression.
+- [Patton, “Volatility Forecast Comparison Using Imperfect Volatility Proxies” (2011)](https://public.econ.duke.edu/~ap172/Patton_robust_JoE_forthcoming.pdf): basis for reporting QLIKE alongside variance MSE when the realized-volatility target is noisy.
+- [Hansen and Lunde, “A Forecast Comparison of Volatility Models: Does Anything Beat a GARCH(1,1)?” (2005)](https://doi.org/10.1002/jae.800): supports retaining a plain GARCH benchmark and testing asymmetric models out of sample rather than presuming complexity wins.
+
 - [Cox, Ross, and Rubinstein, “Option Pricing: A Simplified Approach” (1979)](https://doi.org/10.1016/0304-405X(79)90015-1): the primary CRR discrete-time, no-arbitrage foundation for the binomial implementation.
 - [Barone-Adesi and Whaley, “Efficient Analytic Approximation of American Option Values” (1987)](https://doi.org/10.1111/j.1540-6261.1987.tb02569.x): the primary source for the fast quadratic American approximation used as a scanner benchmark.
 - [OCC Characteristics and Risks of Standardized Options](https://www.theocc.com/company-information/documents-and-archives/options-disclosure-document): primary contract-risk and exercise-style definitions. OCC notes that index options may be American- or European-style, which is why FairVal keeps style mapping configurable and warns when it is inferred.

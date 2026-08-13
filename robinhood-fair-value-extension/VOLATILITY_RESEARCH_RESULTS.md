@@ -1,6 +1,22 @@
-# Walk-forward variance research results — v1.5.0
+# Walk-forward variance research results — v2.2.0
 
-## SPY-only version 2.1 update
+## August 12, 2026 SPY forecast upgrade
+
+FairVal now adds variance-targeted GARCH(1,1), asymmetric GJR-GARCH, simple forecast combination, a shrunk convex forecast regression, QLIKE loss, and Mincer-Zarnowitz calibration diagnostics. The daily source was refreshed through the August 11 completed close; the live payload is therefore no longer stale on August 12.
+
+On the full strictly walk-forward SPY evaluation, GJR-GARCH produced the lowest single-model variance MSE at horizons 1, 2, 3, 5, and 10. The rolling selector chose GJR-GARCH for the current 1–5 day forecasts and retained HAR-RV for 10 days because selection depends only on its rolling past window, not on the full evaluation period.
+
+| Horizon | Current selected model | Current forecast | GJR variance MSE | Previous benchmark variance MSE | Reduction |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | GJR-GARCH | 11.88% | 0.008709 | 0.009303 (EWMA) | 6.4% |
+| 2 | GJR-GARCH | 11.98% | 0.010515 | 0.011292 (EWMA) | 6.9% |
+| 3 | GJR-GARCH | 12.07% | 0.004869 | 0.005581 (EWMA) | 12.8% |
+| 5 | GJR-GARCH | 12.24% | 0.003411 | 0.003651 (HAR-RV) | 6.6% |
+| 10 | HAR-RV | 11.04% | 0.002154 | 0.002211 (HAR-RV) | 2.6% |
+
+These are model-accuracy comparisons, not option returns. The current option snapshot still dates to August 5, so its candidate rankings are retained as pipeline diagnostics and must not be interpreted as live opportunities.
+
+## Prior SPY-only version 2.1 benchmark
 
 The bundled extension payload is now restricted to SPY. It uses 1,150 daily observations from January 3, 2022 through August 4, 2026, requires 252 completed targets before tuning, uses a rolling 756-target training window, and rebalances parameters every 21 forecast dates. The newest candidate model is a ridge-stabilized log-HAR variance forecast.
 
@@ -12,7 +28,7 @@ The bundled extension payload is now restricted to SPY. It uses 1,150 daily obse
 | 5 | HAR-RV | 11.66% | 0.003651 |
 | 10 | HAR-RV | 12.92% | 0.002211 |
 
-These are forecast-accuracy results, not trading returns. The August 4 payload is stale as of August 11, so version 2.1 displays fair values with a stale warning but blocks flags and strategy candidates until a newer daily-close forecast is imported.
+These were forecast-accuracy results, not trading returns. The version 2.1 August 4 payload became stale on August 11; version 2.2 refreshes the daily close through August 11.
 
 ## Earlier multi-ticker benchmark
 

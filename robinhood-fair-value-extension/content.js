@@ -20,7 +20,7 @@
   };
   const IV_SOURCES = ["walkforward", "surface", "forecast", "individual", "manual"];
   const DEFAULT_SETTINGS = {
-    settingsVersion: 8,
+    settingsVersion: 9,
     enabled: true,
     ivSource: "surface",
     volatility: 20,
@@ -36,7 +36,8 @@
     autoScanIntervalSeconds: 30,
     paperRecording: true,
     strategyEnabled: true,
-    treeSteps: 75,
+    treeSteps: 400,
+    treeTolerance: 0.0025,
     collapsed: false,
   };
   const PAPER_STUDY_VERSION = 4;
@@ -87,10 +88,21 @@
     const sigma = Math.max(Number(input.volatility) / 100, 0.0001);
     const r = Number(input.rate) / 100;
     const q = Number(input.dividend) / 100;
+    const cashDividends = Array.isArray(input.discreteDividends)
+      ? input.discreteDividends
+        .map((item) => ({ days: Number(item?.days), amount: Number(item?.amount) }))
+        .filter((item) => Number.isFinite(item.days) && Number.isFinite(item.amount) && item.days > 0 && item.days <= Number(input.days) && item.amount > 0)
+      : [];
+    const cashDividendPv = cashDividends.reduce(
+      (total, item) => total + item.amount * Math.exp(-r * item.days / 365),
+      0,
+    );
+    const pricingSpot = S - cashDividendPv;
+    if (pricingSpot <= 0) throw new Error("cash-dividend present value must be below spot");
     const sqrtT = Math.sqrt(T);
     const discountR = Math.exp(-r * T);
     const discountQ = Math.exp(-q * T);
-    const d1 = (Math.log(S / K) + (r - q + (sigma * sigma) / 2) * T) / (sigma * sqrtT);
+    const d1 = (Math.log(pricingSpot / K) + (r - q + (sigma * sigma) / 2) * T) / (sigma * sqrtT);
     const d2 = d1 - sigma * sqrtT;
     const pdfD1 = normalPdf(d1);
     const nD1 = normalCdf(d1);
@@ -99,23 +111,24 @@
     // Theta is per calendar day (÷365, matching calendar-time pricing); rho is
     // per one percentage-point move in the rate (÷100). Gamma and vega are the
     // same for a call and a put; delta/theta/rho are per option type.
-    const thetaCommon = -(S * discountQ * pdfD1 * sigma) / (2 * sqrtT);
+    const thetaCommon = -(pricingSpot * discountQ * pdfD1 * sigma) / (2 * sqrtT);
     const callTheta =
-      (thetaCommon - r * K * discountR * nD2 + q * S * discountQ * nD1) / 365;
+      (thetaCommon - r * K * discountR * nD2 + q * pricingSpot * discountQ * nD1) / 365;
     const putTheta =
-      (thetaCommon + r * K * discountR * normalCdf(-d2) - q * S * discountQ * normalCdf(-d1)) / 365;
+      (thetaCommon + r * K * discountR * normalCdf(-d2) - q * pricingSpot * discountQ * normalCdf(-d1)) / 365;
 
     return {
-      call: Math.max(S * discountQ * nD1 - K * discountR * nD2, 0),
-      put: Math.max(K * discountR * normalCdf(-d2) - S * discountQ * normalCdf(-d1), 0),
+      call: Math.max(pricingSpot * discountQ * nD1 - K * discountR * nD2, 0),
+      put: Math.max(K * discountR * normalCdf(-d2) - pricingSpot * discountQ * normalCdf(-d1), 0),
       callDelta: discountQ * nD1,
       putDelta: -discountQ * normalCdf(-d1),
-      gamma: (discountQ * pdfD1) / (S * sigma * sqrtT),
-      vega: (S * discountQ * pdfD1 * sqrtT) / 100,
+      gamma: (discountQ * pdfD1) / (pricingSpot * sigma * sqrtT),
+      vega: (pricingSpot * discountQ * pdfD1 * sqrtT) / 100,
       callTheta,
       putTheta,
       callRho: (K * T * discountR * nD2) / 100,
       putRho: -(K * T * discountR * normalCdf(-d2)) / 100,
+      cashDividendPresentValue: cashDividendPv,
     };
   }
 
@@ -395,6 +408,21 @@
     return a[interval] + b[interval] * offset + c[interval] * offset ** 2 + d[interval] * offset ** 3;
   }
 
+  function continuousTreasuryZeroProxy(points) {
+    return (points || []).map((point) => {
+      const days = Number(point.days);
+      const annualYield = Number(point.rate) / 100;
+      if (!(days > 0) || !Number.isFinite(annualYield)) return null;
+      const years = days / 365;
+      // CMT points are par yields, not a discount curve. Convert their quoted
+      // convention into a continuous zero-rate proxy and label it honestly.
+      const continuous = days <= 365
+        ? Math.log(1 + annualYield * years) / years
+        : 2 * Math.log(1 + annualYield / 2);
+      return { days, rate: continuous * 100 };
+    }).filter(Boolean);
+  }
+
   function parseTreasuryXml(xml) {
     const tags = [
       ["BC_1MONTH", 30],
@@ -526,6 +554,125 @@
     return Number.isFinite(coefficients[0]) ? Math.min(Math.max(coefficients[0], 1), 300) : null;
   }
 
+  function sviTotalVariance(logForwardMoneyness, parameters) {
+    const x = Number(logForwardMoneyness) - parameters.m;
+    return parameters.a + parameters.b * (parameters.rho * x + Math.sqrt(x * x + parameters.sigma * parameters.sigma));
+  }
+
+  function fitSviSmile(observations, {
+    spot,
+    days,
+    rate = 0,
+    dividend = 0,
+    discreteDividends = [],
+  }) {
+    const T = Math.max(Number(days) / 365, 1 / (365 * 24 * 60));
+    const r = Number(rate) / 100;
+    const q = Number(dividend) / 100;
+    const cashDividendPv = (discreteDividends || []).reduce((total, item) => {
+      const dividendDays = Number(item?.days);
+      const amount = Number(item?.amount);
+      return Number.isFinite(dividendDays) && Number.isFinite(amount) && dividendDays > 0 && dividendDays <= days
+        ? total + amount * Math.exp(-r * dividendDays / 365)
+        : total;
+    }, 0);
+    const prepaidSpot = Number(spot) - cashDividendPv;
+    if (!(prepaidSpot > 0)) return { status: "invalid_forward", parameters: null };
+    const forward = prepaidSpot * Math.exp((r - q) * T);
+    const unique = new Map();
+    for (const point of observations || []) {
+      if (!Number.isFinite(point?.strike) || !Number.isFinite(point?.iv) || point.strike <= 0 || point.iv <= 0) continue;
+      const key = Number(point.strike).toFixed(6);
+      if (!unique.has(key)) unique.set(key, []);
+      unique.get(key).push(Number(point.iv));
+    }
+    const samples = [...unique.entries()].map(([strike, ivs]) => {
+      const iv = median(ivs);
+      const k = Math.log(Number(strike) / forward);
+      return { strike: Number(strike), k, totalVariance: (iv / 100) ** 2 * T, baseWeight: 1 / (1 + 8 * Math.abs(k)) };
+    }).filter((point) => Number.isFinite(point.totalVariance) && point.totalVariance > 0);
+    if (samples.length < 5) return { status: "insufficient_points", parameters: null, forward, observations: samples.length };
+
+    const solveLinear = (m, sigma, rho, weights) => {
+      let sw = 0, swg = 0, swgg = 0, swy = 0, swgy = 0;
+      const shapes = samples.map((sample) => {
+        const x = sample.k - m;
+        return rho * x + Math.sqrt(x * x + sigma * sigma);
+      });
+      samples.forEach((sample, index) => {
+        const weight = Math.max(Number(weights[index]), 1e-12);
+        const shape = shapes[index];
+        sw += weight; swg += weight * shape; swgg += weight * shape * shape;
+        swy += weight * sample.totalVariance; swgy += weight * shape * sample.totalVariance;
+      });
+      const denominator = sw * swgg - swg * swg;
+      let b = Math.abs(denominator) > 1e-18 ? (sw * swgy - swg * swy) / denominator : 0;
+      b = Math.max(b, 0);
+      let a = (swy - b * swg) / Math.max(sw, 1e-12);
+      a = Math.max(a, -b * sigma * Math.sqrt(Math.max(1 - rho * rho, 0)) + 1e-10);
+      const parameters = { a, b, rho, m, sigma };
+      const fitted = samples.map((sample) => sviTotalVariance(sample.k, parameters));
+      const loss = samples.reduce((total, sample, index) => total + weights[index] * (fitted[index] - sample.totalVariance) ** 2, 0) / sw;
+      return { parameters, fitted, loss };
+    };
+    const grid = (low, high, count, logarithmic = false) => Array.from({ length: count }, (_, index) => {
+      const fraction = count === 1 ? 0 : index / (count - 1);
+      return logarithmic ? low * (high / low) ** fraction : low + (high - low) * fraction;
+    });
+    const kValues = samples.map((sample) => sample.k);
+    const kMin = Math.min(...kValues);
+    const kMax = Math.max(...kValues);
+    const kRange = Math.max(kMax - kMin, 0.05);
+    let mGrid = grid(kMin - 0.35 * kRange, kMax + 0.35 * kRange, 9);
+    let sigmaGrid = grid(0.005, Math.max(0.5, 2 * kRange), 8, true);
+    let rhoGrid = grid(-0.95, 0.95, 11);
+    let weights = samples.map((sample) => sample.baseWeight);
+    let best = null;
+    for (let robustIteration = 0; robustIteration < 3; robustIteration += 1) {
+      best = null;
+      for (const m of mGrid) for (const sigma of sigmaGrid) for (const rho of rhoGrid) {
+        const candidate = solveLinear(m, sigma, rho, weights);
+        if (!best || candidate.loss < best.loss) best = candidate;
+      }
+      const residuals = samples.map((sample, index) => sample.totalVariance - best.fitted[index]);
+      const center = median(residuals) || 0;
+      const scale = Math.max(1.4826 * (median(residuals.map((residual) => Math.abs(residual - center))) || 0), 1e-8);
+      weights = samples.map((sample, index) => sample.baseWeight * Math.min(1, 1.5 * scale / Math.max(Math.abs(residuals[index]), 1e-12)));
+      const { m, sigma, rho } = best.parameters;
+      mGrid = grid(m - Math.max(kRange / 5, 0.005), m + Math.max(kRange / 5, 0.005), 5);
+      sigmaGrid = grid(Math.max(0.001, sigma - Math.max(sigma / 3, 0.003)), sigma + Math.max(sigma / 3, 0.003), 5);
+      rhoGrid = grid(Math.max(-0.999, rho - 0.12), Math.min(0.999, rho + 0.12), 5);
+    }
+    const parameters = best.parameters;
+    let minimumButterflyG = Number.POSITIVE_INFINITY;
+    let minimumVariance = Number.POSITIVE_INFINITY;
+    for (const k of grid(Math.min(kMin - 0.25, -0.75), Math.max(kMax + 0.25, 0.75), 201)) {
+      const x = k - parameters.m;
+      const root = Math.sqrt(x * x + parameters.sigma ** 2);
+      const variance = sviTotalVariance(k, parameters);
+      const first = parameters.b * (parameters.rho + x / root);
+      const second = parameters.b * parameters.sigma ** 2 / root ** 3;
+      const safeVariance = Math.max(variance, 1e-12);
+      const butterflyG = (1 - k * first / (2 * safeVariance)) ** 2 - first ** 2 / 4 * (1 / safeVariance + 0.25) + second / 2;
+      minimumVariance = Math.min(minimumVariance, variance);
+      minimumButterflyG = Math.min(minimumButterflyG, butterflyG);
+    }
+    return {
+      status: "fitted",
+      parameters,
+      forward,
+      observations: samples.length,
+      minimumButterflyG,
+      butterflyArbitrageFree: minimumVariance > 0 && minimumButterflyG >= -1e-7,
+      ivAtLogMoneyness(k) {
+        return Math.sqrt(Math.max(sviTotalVariance(k, parameters), 0) / T) * 100;
+      },
+      ivAtStrike(strike) {
+        return this.ivAtLogMoneyness(Math.log(Number(strike) / forward));
+      },
+    };
+  }
+
   function parseMoney(value) {
     if (typeof value !== "string" || value.includes("—")) return null;
     const parsed = Number(value.replace(/[^0-9.-]/g, ""));
@@ -635,6 +782,13 @@
     return Math.max((settlement - now) / 86_400_000, 1 / (24 * 60));
   }
 
+  function settlementMinutesForSeries(seriesTicker) {
+    const series = String(seriesTicker || "").replace(/^\^/, "").toUpperCase();
+    if (series === "SPX") return 9 * 60 + 30;
+    if (["SPXW", "XSP"].includes(series)) return 16 * 60;
+    return 16 * 60 + 15;
+  }
+
   function thirdFriday(year, month) {
     const first = new Date(Date.UTC(year, month, 1));
     const firstFriday = 1 + ((5 - first.getUTCDay() + 7) % 7);
@@ -662,29 +816,38 @@
   function dividendAssumption({ ticker, spot, expiration, days, rate, now = Date.now() }) {
     const annualYield = DIVIDEND_DEFAULTS[ticker] ?? 0;
     if (ticker === 'SPX') {
-      return { yield: annualYield, count: null, model: 'continuous index yield' };
+      return { yield: annualYield, count: null, discreteDividends: [], model: 'continuous index yield' };
     }
     if (!['SPY', 'QQQ'].includes(ticker)) {
-      return { yield: 0, count: null, model: '0% fallback until 3+ Mark/IV pairs are scanned' };
+      return { yield: 0, count: null, discreteDividends: [], model: '0% fallback until 3+ Mark/IV pairs are scanned' };
     }
     const settlement = newYorkSettlement(expiration, 16 * 60 + 15);
     const dividendDates = quarterlyDividendDates(ticker, now, settlement);
     if (!dividendDates.length || !Number.isFinite(days) || days <= 0) {
-      return { yield: 0, count: 0, model: 'no forecast dividend before expiry' };
+      return { yield: 0, count: 0, discreteDividends: [], model: 'no forecast dividend before expiry' };
     }
     const annualCashDividend = Number(spot) * (annualYield / 100);
     const expectedQuarterlyDividend = annualCashDividend / 4;
     const continuouslyCompoundedRate = Number(rate) / 100;
-    const presentValue = dividendDates.reduce((total, timestamp) => {
-      const years = Math.max((timestamp - now) / 31_536_000_000, 0);
-      return total + expectedQuarterlyDividend * Math.exp(-continuouslyCompoundedRate * years);
+    const discreteDividends = dividendDates.map((timestamp) => ({
+      days: Math.max((timestamp - now) / 86_400_000, 1 / 1440),
+      amount: expectedQuarterlyDividend,
+      exDate: new Date(timestamp).toISOString().slice(0, 10),
+    }));
+    const presentValue = discreteDividends.reduce((total, dividend) => {
+      const years = dividend.days / 365;
+      return total + dividend.amount * Math.exp(-continuouslyCompoundedRate * years);
     }, 0);
     const prepaidForwardSpot = Math.max(Number(spot) - presentValue, Number(spot) * 0.01);
     const effectiveYield = -Math.log(prepaidForwardSpot / Number(spot)) / (days / 365) * 100;
     return {
-      yield: Number.isFinite(effectiveYield) ? effectiveYield : annualYield,
+      // The pricing engines receive the cash schedule directly. effectiveYield
+      // remains metadata only so the cash amount is not double counted.
+      yield: 0,
+      equivalentYield: Number.isFinite(effectiveYield) ? effectiveYield : annualYield,
       count: dividendDates.length,
-      model: `${dividendDates.length} estimated quarterly dividend${dividendDates.length === 1 ? '' : 's'}`,
+      discreteDividends,
+      model: `${dividendDates.length} estimated discrete quarterly dividend${dividendDates.length === 1 ? '' : 's'}`,
     };
   }
 
@@ -771,6 +934,7 @@
       modelUsed: String(selected.model_used || "unknown"),
       lambdaUsed: selected.lambda_used == null ? null : Number(selected.lambda_used),
       weightsUsed: selected.weights_used || null,
+      parametersUsed: selected.parameters_used || null,
     };
   }
 
@@ -912,18 +1076,60 @@
     ) || null;
   }
 
+  function buildPricingCacheKey({
+    ticker,
+    optionType,
+    expiration,
+    spot,
+    strike,
+    days,
+    fairIv,
+    marketIv,
+    referencePrice,
+    rate,
+    dividend,
+    treeSteps,
+    treeTolerance,
+    discreteDividends = [],
+    exactQuote,
+  }) {
+    // Six-decimal DTE changed every 86 ms and invalidated the expensive
+    // American-tree/IV cache. One-minute theta buckets are materially tighter
+    // than the displayed cent precision while remaining stable during renders.
+    const minuteDteBucket = Math.max(Math.floor(Number(days) * 1440), 0);
+    return [
+      ticker,
+      optionType,
+      expiration,
+      Number(spot).toFixed(3),
+      Number(strike).toFixed(4),
+      minuteDteBucket,
+      Number(fairIv).toFixed(3),
+      Number(marketIv).toFixed(3),
+      Number(referencePrice).toFixed(3),
+      Number(rate).toFixed(4),
+      Number(dividend).toFixed(4),
+      Number(treeSteps),
+      Number(treeTolerance).toFixed(6),
+      discreteDividends.map((item) => `${Number(item.days).toFixed(3)}:${Number(item.amount).toFixed(4)}`).join(","),
+      exactQuote ? "iv" : "noiv",
+    ].join("|");
+  }
+
   const Core = {
     calculateBlackScholes,
     computePaperOutcomes,
     assessDiscrepancy,
     chainImpliedCarry,
     daysToExpiration,
+    settlementMinutesForSeries,
     dividendAssumption,
     extractSelectedIv,
     formatMoney,
     impliedVolatility,
     impliedDividendYield,
     interpolateTreasuryRate,
+    continuousTreasuryZeroProxy,
     newYorkSettlement,
     parseExpirationLabel,
     parseExpandedContract,
@@ -933,6 +1139,8 @@
     parseTreasuryXml,
     sessionAlignedSpot,
     smoothedVolatility,
+    fitSviSmile,
+    sviTotalVariance,
     selectVolatilityForecast,
     moneynessBucket,
     nearestDteBucket,
@@ -944,6 +1152,7 @@
     forecastAgeDays,
     isForecastFresh,
     optionPriceCell,
+    buildPricingCacheKey,
   };
 
   globalThis.__BSFV_CORE__ = Core;
@@ -1185,7 +1394,7 @@
     panel.setAttribute("aria-label", "Black-Scholes fair value controls");
     panel.innerHTML = `
       <div class="bsfv-panel-header">
-        <div><span class="bsfv-live-dot"></span><strong>FAIR VALUE OVERLAY</strong></div>
+        <div><span class="bsfv-live-dot"></span><strong>FAIRVAL RESEARCH OVERLAY</strong></div>
         <button id="bsfv-collapse" type="button" aria-label="Collapse fair value controls">−</button>
       </div>
       <div id="bsfv-panel-body">
@@ -1313,7 +1522,7 @@
 
   function syncPanel(context = pageContext(), details = {}) {
     const panel = ensurePanel();
-    panel.dataset.bsfvBuild = "2.1.0";
+    panel.dataset.bsfvBuild = "2.3.0";
     panel.dataset.bsfvForecastRecords = String(volatilityForecast?.records?.length || 0);
     panel.classList.toggle("is-collapsed", settings.collapsed);
     panel.querySelector("#bsfv-panel-body").hidden = settings.collapsed;
@@ -1374,9 +1583,12 @@
         ? "individual quote-implied IV (circular at 0 shift)"
         : `flat own-vol forecast ${Number(settings.volatility).toFixed(2)}%`;
     const exactCopy = `exact Mark IV ${details.exactCount ?? 0}/${details.totalRows ?? 0}`;
+    const surfaceCopy = details.surfaceModel
+      ? `${details.surfaceModel}${details.sviStatus ? ` (${details.sviStatus})` : ""}`
+      : "surface pending";
     const historyCopy = `history buckets ${details.surfaceContextCount ?? 0}/${details.totalRows ?? 0}`;
     const rateCopy = settings.autoRate
-      ? `r ${Number(details.rate).toFixed(2)}% CMT (${treasuryCurve.date})`
+      ? `r ${Number(details.rate).toFixed(2)}% continuous CMT zero proxy (${treasuryCurve.date})`
       : `r ${Number(settings.rate).toFixed(2)}% manual`;
     const dividendCopy = settings.autoDividend
       ? `q ${Number(details.dividend).toFixed(2)}% · ${details.dividendModel || "ticker default"}`
@@ -1394,7 +1606,7 @@
     const freshnessCopy = settings.ivSource === "walkforward" && details.forecastRecord
       ? details.forecastFresh ? "forecast current" : `forecast stale ${Number(details.forecastAgeDays).toFixed(1)}d`
       : null;
-    statusLine.textContent = `${ivCopy} · ${freshnessCopy ? `${freshnessCopy} · ` : ""}${exactCopy} · ${historyCopy} · ${autoCopy} · ${paperCopy} · shift ${Number(settings.ivShift).toFixed(2)}pt · ${rateCopy} · ${dividendCopy}`;
+    statusLine.textContent = `${ivCopy} · ${freshnessCopy ? `${freshnessCopy} · ` : ""}${surfaceCopy} · ${exactCopy} · ${historyCopy} · ${autoCopy} · ${paperCopy} · shift ${Number(settings.ivShift).toFixed(2)}pt · ${rateCopy} · ${dividendCopy}`;
 
     const alerts = details.alerts || [];
     const alertList = panel.querySelector("#bsfv-alert-list");
@@ -1538,8 +1750,10 @@
         forecastModel: modelDetails.forecastRecord?.modelUsed ?? null,
         forecastLambda: modelDetails.forecastRecord?.lambdaUsed ?? null,
         forecastWeights: modelDetails.forecastRecord?.weightsUsed ?? null,
+        forecastParameters: modelDetails.forecastRecord?.parametersUsed ?? null,
         rate: modelDetails.rate,
         dividend: modelDetails.dividend,
+        discreteDividends: modelDetails.discreteDividends || [],
         days: modelDetails.days,
       });
     }
@@ -1570,13 +1784,13 @@
     }
     captureExpandedQuotes(context);
 
-    const settlementMinutes = context.ticker === "SPX" ? 16 * 60 : 16 * 60 + 15;
+    const settlementMinutes = settlementMinutesForSeries(context.seriesTicker);
     const days = daysToExpiration(context.expiration, Date.now(), settlementMinutes);
     const interpolatedRate = settings.autoRate
-      ? interpolateTreasuryRate(treasuryCurve.points, days)
+      ? interpolateTreasuryRate(continuousTreasuryZeroProxy(treasuryCurve.points), days)
       : Number(settings.rate);
     const effectiveRate = Number.isFinite(interpolatedRate) ? interpolatedRate : Number(settings.rate);
-    const inferredCarry = settings.autoDividend
+    const inferredCarry = settings.autoDividend && !Object.prototype.hasOwnProperty.call(DIVIDEND_DEFAULTS, context.ticker)
       ? chainImpliedCarry({
         quotes: [...exactQuotes.values()],
         optionType: context.optionType,
@@ -1585,15 +1799,18 @@
         rate: effectiveRate,
       })
       : null;
+    const scheduledDividend = dividendAssumption({
+      ticker: context.ticker,
+      spot: context.spot,
+      expiration: context.expiration,
+      days,
+      rate: effectiveRate,
+    });
     const dividendDetails = settings.autoDividend
-      ? inferredCarry || dividendAssumption({
-          ticker: context.ticker,
-          spot: context.spot,
-          expiration: context.expiration,
-          days,
-          rate: effectiveRate,
-        })
-      : { yield: Number(settings.dividend), count: null, model: "manual" };
+      ? Object.prototype.hasOwnProperty.call(DIVIDEND_DEFAULTS, context.ticker)
+        ? scheduledDividend
+        : inferredCarry || scheduledDividend
+      : { yield: Number(settings.dividend), count: null, discreteDividends: [], model: "manual continuous yield" };
     const effectiveDividend = dividendDetails.yield;
     const forecastRecord = settings.ivSource === "walkforward"
       ? selectVolatilityForecast(volatilityForecast, context.ticker, forecastHorizonFromDte(days))
@@ -1625,16 +1842,31 @@
         days,
         rate: effectiveRate,
         dividend: effectiveDividend,
+        discreteDividends: dividendDetails.discreteDividends || [],
       });
       return { row, priceCell, strike, displayedPrice, referencePrice, exactQuote, marketIv };
     }).filter(Boolean);
     const observations = contracts
       .filter((contract) => contract.marketIv != null)
       .map((contract) => ({ strike: contract.strike, iv: contract.marketIv }));
-    const marketSurfaceAtm = smoothedVolatility(context.spot, observations, context.spot);
+    const sviSurface = fitSviSmile(observations, {
+      spot: context.spot,
+      days,
+      rate: effectiveRate,
+      dividend: effectiveDividend,
+      discreteDividends: dividendDetails.discreteDividends || [],
+    });
+    const marketSurfaceAtm = sviSurface.status === "fitted" && sviSurface.butterflyArbitrageFree
+      ? sviSurface.ivAtLogMoneyness(0)
+      : smoothedVolatility(context.spot, observations, context.spot);
     const pricedContracts = contracts.map((contract) => {
       const { row, priceCell, strike, referencePrice, exactQuote, marketIv } = contract;
-      const surfaceIv = smoothedVolatility(strike, observations, context.spot);
+      const surfaceIv = sviSurface.status === "fitted" && sviSurface.butterflyArbitrageFree
+        ? sviSurface.ivAtStrike(strike)
+        : smoothedVolatility(strike, observations, context.spot);
+      const surfaceModel = sviSurface.status === "fitted" && sviSurface.butterflyArbitrageFree
+        ? "SVI forward surface"
+        : "robust local smile fallback";
       const ownForecastVol = settings.ivSource === "walkforward"
         ? forecastRecord?.forecastVol
         : Number(settings.volatility);
@@ -1661,14 +1893,27 @@
         volatility: fairIv,
         rate: effectiveRate,
         dividend: effectiveDividend,
+        discreteDividends: dividendDetails.discreteDividends || [],
       };
-      const pricingCacheKey = [
-        context.ticker, context.optionType, context.expiration, context.spot.toFixed(4), strike,
-        days.toFixed(6), fairIv.toFixed(4), Number(marketIv).toFixed(4), referencePrice.toFixed(4),
-        effectiveRate.toFixed(4), effectiveDividend.toFixed(4), Number(settings.treeSteps || 75),
-        exactQuote ? "iv" : "noiv",
-      ].join("|");
+      const pricingCacheKey = buildPricingCacheKey({
+        ticker: context.ticker,
+        optionType: context.optionType,
+        expiration: context.expiration,
+        spot: context.spot,
+        strike,
+        days,
+        fairIv,
+        marketIv,
+        referencePrice,
+        rate: effectiveRate,
+        dividend: effectiveDividend,
+        treeSteps: Number(settings.treeSteps || 400),
+        treeTolerance: Number(settings.treeTolerance || 0.0025),
+        discreteDividends: dividendDetails.discreteDividends || [],
+        exactQuote,
+      });
       let pricing = pricingCache.get(pricingCacheKey);
+      let pricingError = null;
       if (!pricing && Pricing) {
         try {
           pricing = Pricing.compareModels({
@@ -1677,13 +1922,18 @@
             marketMid: referencePrice,
             marketIv: Number.isFinite(marketIv) ? marketIv : fairIv,
             forecastVolatility: fairIv,
-            treeSteps: Math.min(Math.max(Number(settings.treeSteps) || 75, 25), 500),
-            calculateIv: Boolean(exactQuote && Number.isFinite(marketIv)),
+            treeSteps: Math.min(Math.max(Number(settings.treeSteps) || 400, 100), 800),
+            treeTolerance: Math.min(Math.max(Number(settings.treeTolerance) || 0.0025, 0.0001), 0.1),
+            // Robinhood already supplies the exact contract IV. Re-inverting a
+            // 400-step American tree for every visible row is a redundant,
+            // multi-second hot-path diagnostic; offline reports still compute it.
+            calculateIv: false,
           });
           pricingCache.set(pricingCacheKey, pricing);
           if (pricingCache.size > 2_000) pricingCache.delete(pricingCache.keys().next().value);
-        } catch {
+        } catch (error) {
           pricing = null;
+          pricingError = error instanceof Error ? error.message : String(error || "unknown pricing error");
         }
       }
       const fairValue = pricing?.selectedFairValue ?? optionPrice(pricingInput);
@@ -1696,6 +1946,7 @@
             volatility: marketIv,
             rate: effectiveRate,
             dividend: effectiveDividend,
+            discreteDividends: dividendDetails.discreteDividends || [],
           })
         : null;
       const surfaceBenchmark = selectSurfaceBenchmark(
@@ -1739,6 +1990,9 @@
         variance,
         surfaceBenchmark,
         pricing,
+        pricingError,
+        surfaceModel,
+        sviSurface,
         marketGreeks,
       };
     }).filter(Boolean);
@@ -1775,6 +2029,7 @@
     queuePaperSnapshots(context, pricedContracts, {
       rate: effectiveRate,
       dividend: effectiveDividend,
+      discreteDividends: dividendDetails.discreteDividends || [],
       days,
       forecastRecord,
     });
@@ -1792,12 +2047,19 @@
       forecastAgeDays: forecastAge,
       forecastFresh,
       strategyStudy,
+      surfaceModel: sviSurface.status === "fitted" && sviSurface.butterflyArbitrageFree
+        ? "SVI forward surface"
+        : "robust local smile fallback",
+      sviStatus: sviSurface.status === "fitted"
+        ? `butterfly ${sviSurface.butterflyArbitrageFree ? "pass" : "fail"}`
+        : sviSurface.status,
     });
 
     for (const contract of pricedContracts) {
       const {
         priceCell, displayedPrice, referencePrice, exactQuote, marketIv,
-        fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark, pricing, marketGreeks,
+        fairIv, fairValue, difference, ivEdge, alert, variance, surfaceBenchmark, pricing, pricingError,
+        surfaceModel, sviSurface, marketGreeks,
       } = contract;
       let badge = priceCell.querySelector("[data-bsfv-overlay]");
       if (!badge) {
@@ -1827,8 +2089,14 @@
       const modelLabel = pricing?.modelUsed === "binomial_american_crr"
         ? "CRR"
         : pricing?.style === "european" ? "BS-EU" : "BS-q";
+      const valueRole = ["walkforward", "forecast", "manual"].includes(settings.ivSource)
+        ? "RV-SCN"
+        : "MKT-Q";
       const forecastStatusCopy = settings.ivSource === "walkforward" && !forecastFresh ? " · STALE FCST" : "";
-      const nextText = `FV ${formatMoney(fairValue)} · ${modelLabel} · ${marketIvCopy}${ivEdgeCopy}${varianceEdgeCopy}${percentileCopy}${forecastStatusCopy}${flagCopy}`;
+      const convergenceCopy = pricing?.style === "american"
+        ? ` · N${pricing.treeStepsUsed || "?"}${pricing.treeConverged ? "✓" : "!"}`
+        : "";
+      const nextText = `${valueRole} ${formatMoney(fairValue)} · ${modelLabel}${convergenceCopy} · ${marketIvCopy}${ivEdgeCopy}${varianceEdgeCopy}${percentileCopy}${forecastStatusCopy}${flagCopy}`;
       if (badge.textContent !== nextText) badge.textContent = nextText;
       const comparison = difference >= 0 ? `+${formatMoney(difference)}` : `-${formatMoney(Math.abs(difference))}`;
       badge.dataset.signal = Math.abs(difference) < 0.005 ? "flat" : difference > 0 ? "above" : "below";
@@ -1857,9 +2125,15 @@
         ? `greeks at market IV: delta ${(isPutContract ? marketGreeks.putDelta : marketGreeks.callDelta).toFixed(3)}, gamma ${marketGreeks.gamma.toFixed(4)}, theta ${formatMoney(isPutContract ? marketGreeks.putTheta : marketGreeks.callTheta)}/day, vega ${formatMoney(marketGreeks.vega)}/pt, rho ${formatMoney(isPutContract ? marketGreeks.putRho : marketGreeks.callRho)}/pt`
         : "greeks unavailable without market IV";
       const modelComparisonCopy = pricing
-        ? `selected model ${pricing.modelUsed}: ${pricing.modelReason}; BS forecast-vol value ${formatMoney(pricing.bsForecastFairValue)}; American CRR forecast-vol value ${Number.isFinite(pricing.americanForecastFairValue) ? formatMoney(pricing.americanForecastFairValue) : "n/a"}; trinomial ${Number.isFinite(pricing.trinomialForecastFairValue) ? formatMoney(pricing.trinomialForecastFairValue) : "n/a"}; BAW approximation ${Number.isFinite(pricing.approximationForecastFairValue) ? formatMoney(pricing.approximationForecastFairValue) : "n/a"}; American-vs-BS difference ${formatMoney(pricing.earlyExercisePremium)}; same-tree exercise premium ${formatMoney(pricing.sameTreeExercisePremium)}; BS midpoint IV ${Number.isFinite(pricing.blackScholesIv) ? `${pricing.blackScholesIv.toFixed(2)}%` : "n/a"}; American midpoint IV ${Number.isFinite(pricing.americanIv) ? `${pricing.americanIv.toFixed(2)}%` : "n/a"}${pricing.pricingWarning ? `; warning: ${pricing.pricingWarning}` : ""}`
-        : "American-model core unavailable; dividend-adjusted Black-Scholes fallback";
-      badge.title = `${formatMoney(fairValue)} selected research value; ${comparison} versus ${referenceCopy}. ${modelComparisonCopy}. Market-IV model value is diagnostic/circular; the research edge uses forecast IV ${fairIv.toFixed(2)}%. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; IV edge ${Number.isFinite(ivEdge) ? `${ivEdge >= 0 ? "+" : ""}${ivEdge.toFixed(2)} volatility points` : "unavailable"}; ${varianceCopy}; ${gammaCopy}; vega-normalized price edge ${Number.isFinite(variance.vegaNormalizedEdge) ? `${variance.vegaNormalizedEdge >= 0 ? "+" : ""}${variance.vegaNormalizedEdge.toFixed(2)} vol points` : "unavailable"}; ${greeksCopy}; signal ${variance.candidateSide}; ${historyCopy}; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend/carry input ${effectiveDividend.toFixed(2)}%.${alertCopy}`;
+        ? `selected model ${pricing.modelUsed}: ${pricing.modelReason}; BS forecast-vol value ${formatMoney(pricing.bsForecastFairValue)}; American adaptive CRR forecast-vol value ${Number.isFinite(pricing.americanForecastFairValue) ? formatMoney(pricing.americanForecastFairValue) : "n/a"}; tree ${pricing.treeConvergenceStatus} at ${pricing.treeStepsUsed ?? "n/a"} steps with ${Number.isFinite(pricing.treeConvergenceError) ? `$${pricing.treeConvergenceError.toFixed(4)}` : "n/a"} last error versus $${Number(pricing.treeConvergenceTolerance || 0).toFixed(4)} tolerance; trinomial ${Number.isFinite(pricing.trinomialForecastFairValue) ? formatMoney(pricing.trinomialForecastFairValue) : "n/a"}; BAW approximation ${Number.isFinite(pricing.approximationForecastFairValue) ? formatMoney(pricing.approximationForecastFairValue) : "n/a"}; American-vs-BS difference ${formatMoney(pricing.earlyExercisePremium)}; same-tree exercise premium ${formatMoney(pricing.sameTreeExercisePremium)}; BS midpoint IV ${Number.isFinite(pricing.blackScholesIv) ? `${pricing.blackScholesIv.toFixed(2)}%` : "n/a"}; American midpoint IV ${Number.isFinite(pricing.americanIv) ? `${pricing.americanIv.toFixed(2)}%` : "n/a"}${pricing.pricingWarning ? `; warning: ${pricing.pricingWarning}` : ""}`
+        : `dividend-adjusted Black-Scholes fallback${pricingError ? ` after pricing-core error: ${pricingError}` : " because the American-model core is unavailable"}`;
+      const valueRoleCopy = valueRole === "RV-SCN"
+        ? "This is a physical realized-volatility scenario value, not a uniquely identified risk-neutral fair value."
+        : "This is a market-implied risk-neutral diagnostic and is circular at zero IV shift.";
+      const surfaceCopy = surfaceModel === "SVI forward surface"
+        ? `SVI forward-moneyness surface with ${sviSurface.observations} strikes; minimum butterfly g ${sviSurface.minimumButterflyG.toFixed(4)} (pass)`
+        : `${surfaceModel}; SVI status ${sviSurface.status}${sviSurface.status === "fitted" ? `, butterfly ${sviSurface.butterflyArbitrageFree ? "pass" : "fail"}` : ""}`;
+      badge.title = `${formatMoney(fairValue)} selected research value; ${comparison} versus ${referenceCopy}. ${valueRoleCopy} ${modelComparisonCopy}. Market-IV model value is diagnostic/circular; the research edge uses forecast IV ${fairIv.toFixed(2)}%. Surface: ${surfaceCopy}. ${ivBasisCopy} IV ${marketIv == null ? "unavailable" : `${marketIv.toFixed(2)}%`}; IV edge ${Number.isFinite(ivEdge) ? `${ivEdge >= 0 ? "+" : ""}${ivEdge.toFixed(2)} volatility points` : "unavailable"}; ${varianceCopy}; ${gammaCopy}; vega-normalized price edge ${Number.isFinite(variance.vegaNormalizedEdge) ? `${variance.vegaNormalizedEdge >= 0 ? "+" : ""}${variance.vegaNormalizedEdge.toFixed(2)} vol points` : "unavailable"}; ${greeksCopy}; signal ${variance.candidateSide}; ${historyCopy}; option-aligned spot ${formatMoney(context.spot)} (${context.basis}); CMT rate ${effectiveRate.toFixed(2)}%; dividend input ${dividendDetails.model} (continuous q ${effectiveDividend.toFixed(2)}%).${alertCopy}`;
     }
   }
 
@@ -1913,6 +2187,8 @@
         settings.ivSource = "surface";
       }
       settings.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
+      if (needsMigration && Number(settings.treeSteps) <= 75) settings.treeSteps = DEFAULT_SETTINGS.treeSteps;
+      if (!Number.isFinite(Number(settings.treeTolerance))) settings.treeTolerance = DEFAULT_SETTINGS.treeTolerance;
       if (needsMigration) chrome.storage.sync.set({
         settingsVersion: settings.settingsVersion,
         alertsEnabled: settings.alertsEnabled,
@@ -1923,6 +2199,7 @@
         autoScanIntervalSeconds: settings.autoScanIntervalSeconds,
         paperRecording: settings.paperRecording,
         treeSteps: settings.treeSteps,
+        treeTolerance: settings.treeTolerance,
       });
       ensurePanel();
       syncPanel();

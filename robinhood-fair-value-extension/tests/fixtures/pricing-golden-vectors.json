@@ -1,0 +1,30 @@
+[
+  {
+    "name": "atm_call_30d",
+    "inputs": {"spot": 100, "strike": 100, "days": 30, "volatility": 20, "rate": 4, "dividend": 1, "optionType": "call", "exerciseStyle": "american"},
+    "adaptivePrice": 2.407590426104221,
+    "blackScholesPrice": 2.4076017818506656,
+    "stepsUsed": 200
+  },
+  {
+    "name": "deep_itm_put_180d",
+    "inputs": {"spot": 85, "strike": 100, "days": 180, "volatility": 25, "rate": 5, "dividend": 0, "optionType": "put", "exerciseStyle": "american"},
+    "adaptivePrice": 15.470538320190528,
+    "blackScholesPrice": 14.53221504505261,
+    "stepsUsed": 200
+  },
+  {
+    "name": "dividend_call_90d",
+    "inputs": {"spot": 120, "strike": 110, "days": 90, "volatility": 32, "rate": 4.5, "dividend": 3, "optionType": "call", "exerciseStyle": "american"},
+    "adaptivePrice": 13.522318434768248,
+    "blackScholesPrice": 13.522172729807608,
+    "stepsUsed": 400
+  },
+  {
+    "name": "otm_put_5d",
+    "inputs": {"spot": 775, "strike": 750, "days": 5, "volatility": 22, "rate": 4, "dividend": 1.1, "optionType": "put", "exerciseStyle": "american"},
+    "adaptivePrice": 0.9138724881420361,
+    "blackScholesPrice": 0.9147551837076264,
+    "stepsUsed": 200
+  }
+]

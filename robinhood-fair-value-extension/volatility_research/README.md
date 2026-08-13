@@ -18,6 +18,10 @@ Annualized realized volatility is expressed in percent. The engine evaluates hor
 - `sparse_blend` — a **sparse** variance blend built by greedy forward selection; it adds one window at a time only while training variance MSE keeps improving, is capped at `sparse_max_terms` windows (default 3), and drops any weight below `weight_zero_threshold` (`1e-8`) so unused windows carry exactly zero weight
 - `ewma`, with lambda selected from a coarse `0.70..0.99` grid and a `0.001` fine grid around the coarse winner
 - `har_rv`, a ridge-stabilized log-variance HAR model using daily, weekly, monthly, and downside-return variance components
+- `garch_11`, a variance-targeted GARCH(1,1) estimated by Gaussian quasi maximum likelihood on returns known at each origin
+- `gjr_garch`, the asymmetric GJR-GARCH extension, which allows negative SPY returns to have a different volatility impact
+- `simple_ensemble`, an equal-weighted variance combination of diverse baseline forecasts
+- `adaptive_ensemble`, a shrunk nonnegative forecast regression. It learns convex weights from earlier **out-of-sample** forecasts whose realized targets completed before the current origin
 - `best_model`, selected by past out-of-sample variance MSE for that ticker and horizon:
 
 ```text
@@ -28,9 +32,34 @@ mean(((forecast_vol / 100)^2 - (future_realized_vol / 100)^2)^2)
 
 The blends do **not** rely on four hardcoded windows. `ForecastConfig.vol_windows` supplies a broad candidate set — `1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 45, 60` by default — and the optimizer and sparse selector decide out of sample which windows actually help. The set is configurable and can be extended toward 100D. The 1-day window uses the `abs(return) * sqrt(252)` proxy because a one-observation sample standard deviation is undefined. Both blend optimizers minimize error in annualized **variance** (options are more directly linked to variance than to volatility) and are deterministic functions of the training slice, so the walk-forward leakage guarantee holds. The diagnostics report prints each latest blend as a readable formula, for example `sqrt(0.57*vol_60² + 0.26*vol_3² + 0.10*vol_20² + 0.08*vol_7²)`.
 
+GARCH and GJR parameters are re-estimated on a rolling return history at the configured rebalance interval. Their multi-day forecast is the average expected conditional variance across the requested horizon, not a one-day forecast copied into every DTE. The engine writes parameters to `garch_parameters_history.csv` and forecast-regression weights to `ensemble_weights_history.csv`.
+
+Evaluation also reports Patton's robust QLIKE loss, variance bias, and Mincer-Zarnowitz calibration intercept/slope/R². Model selection continues to minimize past out-of-sample variance MSE, so adding these diagnostics does not silently change the stated objective.
+
+### Backtest exported paper observations
+
+The Chrome popup exports locally recorded signal-time and later bid/ask snapshots. Analyze an export with:
+
+```text
+python -m volatility_research.paper_backtest fair-value-paper-study-YYYY-MM-DD.json --output-dir paper-backtest-output
+```
+
+`paper_outcomes.csv` crosses the ask/bid on entry and the opposite executable side on exit and separately reports option, stock-hedge, and gross delta-hedged P&L. A ridge regression creates a walk-forward **reliability score** only after at least 100 earlier outcomes have resolved. An outcome may train a signal only when its exit timestamp is strictly earlier than the signal. The score never replaces forecast volatility or fair value; it is a conditional residual diagnostic that must earn out-of-sample support.
+
+### Refresh the daily SPY forecast
+
+The realized-volatility forecast changes after a completed daily close, not every quote tick. Refresh public SPY daily closes, rerun the walk-forward engine, and reload the extension:
+
+```text
+python -m volatility_research.update_prices --prices data/robinhood-daily-2022-2026.csv
+python -m volatility_research.cli --prices data/robinhood-daily-2022-2026.csv --ticker SPY --options data/robinhood-options-snapshot-2026-08-05.csv --surface-history data/spy-option-surface-history-2026.csv --output-dir volatility-research-output --min-train 252 --training-window 756 --rebalance-every 21
+```
+
+The updater uses Robinhood's public completed-day historical endpoint. It does not authenticate, scrape the page, or collect an intraday partial bar.
+
 ### Pricing models and Greeks
 
-`pricing_models.py` separates the volatility forecast from the price engine. Every model exposes `price(inputs)` and `greeks(inputs)`; `implied_volatility(target_price, pricing_model, inputs)` accepts any monotone model and returns convergence status, iterations, residual, and a failure reason.
+`pricing_models.py` separates the volatility forecast from the price engine. Every model exposes `price(inputs)` and `greeks(inputs)`; `implied_volatility(target_price, pricing_model, inputs)` accepts any monotone model and returns convergence status, iterations, residual, and a failure reason. A forecast of physical realized volatility is stored and labeled as a scenario input; it is not silently promoted to a risk-neutral fair value.
 
 Implemented models:
 
@@ -42,7 +71,9 @@ Implemented models:
 
 Finite-difference and Longstaff–Schwartz Monte Carlo were deliberately not added to this vanilla continuous-yield path: they would expand numerical and stochastic validation scope without improving the current scanner's explainability. The generic interface leaves room for either model later.
 
-American nodes use `max(discounted risk-neutral continuation, intrinsic)`. European nodes use continuation only. CRR and trinomial also expose practical lattice delta, gamma, theta, exercise-boundary samples, same-tree early-exercise premium, runtime, steps, and convergence diagnostics. Vega and rho use small model-consistent finite differences.
+American nodes use `max(discounted risk-neutral continuation, intrinsic)`. European nodes use continuation only. Adaptive CRR uses 50/100/200/400 step doubling by default, adjacent-step smoothing, a configurable absolute dollar tolerance, and a hard maximum. Failure to meet tolerance is metadata and forces an explicit selection fallback. CRR and trinomial expose practical lattice delta, gamma, theta, exercise-boundary samples, same-tree early-exercise premium, runtime, actual steps, and convergence history. Vega and rho use small model-consistent finite differences.
+
+`PricingInputs.discrete_dividends` accepts dated `(days_from_valuation, cash_amount)` pairs. The lattices use an escrowed-dividend construction and include remaining dividend present value at each node. BAW declines discrete-dividend contracts rather than applying a formula outside its assumptions.
 
 Contract style is configurable. Explicit broker style wins. The default map identifies SPX/SPXW/XSP as European indexes and SPY/QQQ/IWM as American ETFs. A supplied `equity`, `stock`, or `etf` instrument type resolves to American. Every inference is warned; an unresolved contract uses `unknown_style_black_scholes_fallback`.
 
@@ -81,7 +112,7 @@ ticker,date,expiration,dte,option_type,strike,market_iv,bid,ask,volume,open_inte
 
 Optional option columns are `market_mid`, `rate`, and `dividend`. `market_iv` may be decimal (`0.20`) or percent (`20`); auto-detection treats a column median at or below `1.5` as decimal, so unusually high decimal-IV datasets should be converted to percent explicitly. Rate and dividend inputs are explicitly percent (`4.25`, not `0.0425`). If `market_mid` is absent, bid/ask midpoint is used.
 
-Historical surface context uses the same option schema and is supplied with `--surface-history`. Percentiles are computed only from dates strictly before the ranked contract, grouped by ticker, option type, DTE bucket, and log-moneyness bucket. Calls and puts are separate so normal downside put skew is not automatically labeled rich volatility.
+Historical surface context uses the same option schema and is supplied with `--surface-history`. `surface.py` constructs forward price from spot, carry, and available cash-dividend PV; fits robust raw SVI to total variance by expiration; records parameters, residuals, outlier weights, butterfly `g(k)`, and calendar-total-variance diagnostics; and retains raw quotes. Percentiles are computed only from dates strictly before the ranked contract, grouped by ticker, option type, DTE bucket, and forward-log-moneyness bucket. Calls and puts are separate so normal downside put skew is not automatically labeled rich volatility.
 
 ## Run
 
@@ -95,7 +126,9 @@ python -m volatility_research.cli `
   --output-dir volatility-research-output `
   --min-train 30 `
   --training-window 252 `
-  --rebalance-every 5
+  --rebalance-every 5 `
+  --tree-max-steps 400 `
+  --tree-tolerance 0.0025
 ```
 
 Use `--training-window 0` for expanding rather than rolling training. The command writes:
@@ -108,7 +141,7 @@ Use `--training-window 0` for expanding rather than rolling training. The comman
 - `threshold_study.csv`: forecast-reliability sweep — for each minimum `|forecast_vol - market_iv|` gap it reports observation count, coverage, directional accuracy versus market IV, and variance skill versus simply trusting market IV. It answers "does a bigger gap mean a more reliable signal?" empirically and is a research diagnostic, **not** a buy/sell threshold. It needs a historical market-IV series (`--surface-history`), so it only covers tickers with supplied option history.
 - `latest_forecasts.json`: compact `volatility_forecast.v1` bridge for the Chrome extension
 - `variance_diagnostics_report.html`: standalone diagnostics and current research queue
-- `pricing_diagnostics_report.html`: interactive per-contract inputs, model prices, model IVs, selection reason, warnings, and CRR/trinomial 50/100/250/500/1000-step convergence tables
+- `pricing_diagnostics_report.html`: interactive per-contract inputs, model prices, model IVs, SVI residual/static-arbitrage context, selection reason, warnings, and the actual adaptive CRR convergence path
 - six SVG charts and a local `visualizations/index.html` dashboard
 
 ## Extension bridge

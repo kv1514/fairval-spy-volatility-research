@@ -41,7 +41,10 @@
       <label class="enabled compact"><span>Continuous Mark/IV refresh</span><input id="autoScan" type="checkbox"></label>
       <label>Refresh interval seconds<input id="autoScanIntervalSeconds" type="number" min="15" max="300" step="5"></label>
       <label class="enabled compact"><span>Record paper outcomes locally</span><input id="paperRecording" type="checkbox"></label>
-      <label>American tree steps<input id="treeSteps" type="number" min="25" max="500" step="25"></label>
+      <div class="grid">
+        <label>American tree max steps<input id="treeSteps" type="number" min="100" max="800" step="100"></label>
+        <label>Tree tolerance $<input id="treeTolerance" type="number" min="0.0001" max="0.1" step="0.0001"></label>
+      </div>
       <button id="apply" type="button">Apply to Robinhood</button>
       <div class="grid">
         <button id="exportPaper" class="secondary" type="button">Export paper data</button>

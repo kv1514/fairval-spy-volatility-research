@@ -1,5 +1,5 @@
 const DEFAULTS = {
-  settingsVersion: 8,
+  settingsVersion: 9,
   enabled: true,
   ivSource: "surface",
   volatility: 20,
@@ -15,7 +15,8 @@ const DEFAULTS = {
   autoScan: true,
   autoScanIntervalSeconds: 30,
   paperRecording: true,
-  treeSteps: 75,
+  treeSteps: 400,
+  treeTolerance: 0.0025,
 };
 const PAPER_STUDY_VERSION = 4;
 const IV_SOURCES = ["walkforward", "surface", "forecast", "individual", "manual"];
@@ -37,6 +38,7 @@ const fields = {
   autoScanIntervalSeconds: document.getElementById("autoScanIntervalSeconds"),
   paperRecording: document.getElementById("paperRecording"),
   treeSteps: document.getElementById("treeSteps"),
+  treeTolerance: document.getElementById("treeTolerance"),
 };
 
 function syncDisabledState() {
@@ -72,7 +74,10 @@ function showForecastStatus(payload) {
 
 chrome.storage.sync.get(null, (saved) => {
   const settings = { ...DEFAULTS, ...saved };
-  if (Number(saved.settingsVersion || 0) < DEFAULTS.settingsVersion) chrome.storage.sync.set({
+  const needsMigration = Number(saved.settingsVersion || 0) < DEFAULTS.settingsVersion;
+  if (needsMigration && Number(settings.treeSteps) <= 75) settings.treeSteps = DEFAULTS.treeSteps;
+  if (!Number.isFinite(Number(settings.treeTolerance))) settings.treeTolerance = DEFAULTS.treeTolerance;
+  if (needsMigration) chrome.storage.sync.set({
     settingsVersion: DEFAULTS.settingsVersion,
     alertsEnabled: settings.alertsEnabled,
     strategyEnabled: settings.strategyEnabled,
@@ -82,6 +87,7 @@ chrome.storage.sync.get(null, (saved) => {
     autoScanIntervalSeconds: settings.autoScanIntervalSeconds,
     paperRecording: settings.paperRecording,
     treeSteps: settings.treeSteps,
+    treeTolerance: settings.treeTolerance,
   });
   fields.enabled.checked = settings.enabled;
   fields.ivSource.value = IV_SOURCES.includes(settings.ivSource)
@@ -101,6 +107,7 @@ chrome.storage.sync.get(null, (saved) => {
   fields.autoScanIntervalSeconds.value = settings.autoScanIntervalSeconds;
   fields.paperRecording.checked = settings.paperRecording;
   fields.treeSteps.value = settings.treeSteps;
+  fields.treeTolerance.value = settings.treeTolerance;
   syncDisabledState();
 });
 
@@ -167,7 +174,8 @@ document.getElementById("apply").addEventListener("click", () => {
     autoScan: fields.autoScan.checked,
     autoScanIntervalSeconds: Math.min(Math.max(Number(fields.autoScanIntervalSeconds.value) || 30, 15), 300),
     paperRecording: fields.paperRecording.checked,
-    treeSteps: Math.min(Math.max(Number(fields.treeSteps.value) || 75, 25), 500),
+    treeSteps: Math.min(Math.max(Number(fields.treeSteps.value) || 400, 100), 800),
+    treeTolerance: Math.min(Math.max(Number(fields.treeTolerance.value) || 0.0025, 0.0001), 0.1),
   };
   chrome.storage.sync.set(settings, async () => {
     const message = document.getElementById("message");

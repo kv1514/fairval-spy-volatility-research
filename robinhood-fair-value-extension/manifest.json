@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "FairVal SPY Volatility Research",
-  "version": "2.1.0",
-  "description": "SPY volatility research with live fair values, executable multi-leg structures, and delta-hedged paper diagnostics.",
+  "version": "2.3.0",
+  "description": "SPY volatility research with adaptive American pricing, GARCH/HAR forecasts, executable structures, and walk-forward paper diagnostics.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://home.treasury.gov/*"],
   "action": {
