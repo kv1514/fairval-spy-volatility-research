@@ -435,6 +435,8 @@ export function comparePricingModels({
   inputs,
   optionType,
   marketMid,
+  marketBid,
+  marketAsk,
   marketIv,
   forecastVolatility,
   treeSteps = 400,
@@ -445,6 +447,8 @@ export function comparePricingModels({
   inputs: ModelInputs;
   optionType: OptionType;
   marketMid: number;
+  marketBid?: number;
+  marketAsk?: number;
   marketIv: number;
   forecastVolatility: number;
   treeSteps?: number;
@@ -463,7 +467,7 @@ export function comparePricingModels({
   let trinomialForecastFairValue: number | null = null;
   let americanIv: ImpliedVolatilityResult = { volatility: null, converged: false, status: "not_applicable", reason: null, iterations: 0 };
   let modelUsed = "black_scholes_dividend_adjusted";
-  let modelReason = resolution.style === "european" ? "European-style index option." : "American exercise premium was negligible.";
+  let modelReason = resolution.style === "european" ? "European index option: using dividend-adjusted Black-Scholes." : "American exercise premium was negligible.";
   const warnings = [resolution.reason];
   let sameTreeExercisePremium = 0;
   let treeDifference: number | null = null;
@@ -472,6 +476,14 @@ export function comparePricingModels({
   let treeConvergenceError: number | null = null;
   let treeConvergenceStatus = "not_applicable";
   let treeHistory: ReturnType<typeof calculateAdaptiveCrr>["history"] = [];
+  const quotedSpread = Number.isFinite(marketBid) && Number.isFinite(marketAsk) && Number(marketAsk) > Number(marketBid)
+    ? Number(marketAsk) - Number(marketBid) : 0;
+  const premiumThresholdComponents = {
+    absolute: 0.01,
+    spreadAdjusted: 0.10 * quotedSpread,
+    priceRelative: 0.005 * Math.max(Math.abs(marketMid), 0),
+  };
+  const earlyExerciseMaterialityThreshold = Math.max(...Object.values(premiumThresholdComponents));
   if (resolution.style === "american") {
     try {
       const forecastTree = calculateAdaptiveCrr(forecastInput, {
@@ -507,12 +519,14 @@ export function comparePricingModels({
       } else if (treeDifference > Math.max(0.02, americanForecastFairValue * 0.005)) {
         warnings.push(`Tree-model disagreement is $${treeDifference.toFixed(3)}; Black-Scholes fallback used.`);
         modelReason = "Fallback because American tree agreement was poor.";
-      } else if (sameTreeExercisePremium >= 0.01 && americanIv.converged) {
+      } else if (sameTreeExercisePremium >= earlyExerciseMaterialityThreshold) {
         modelUsed = "binomial_american_crr";
-        modelReason = "American CRR selected because same-lattice early-exercise premium was material.";
-      } else if (!americanIv.converged) {
+        modelReason = `American ETF/equity option: CRR selected because the $${sameTreeExercisePremium.toFixed(4)} same-lattice early-exercise premium exceeds the $${earlyExerciseMaterialityThreshold.toFixed(4)} spread/price-adjusted threshold.`;
+      } else {
+        modelReason = `American ETF/equity option: Black-Scholes retained because the $${sameTreeExercisePremium.toFixed(4)} same-lattice early-exercise premium is below the $${earlyExerciseMaterialityThreshold.toFixed(4)} spread/price-adjusted threshold.`;
+      }
+      if (!americanIv.converged) {
         warnings.push(`American IV solver failed: ${americanIv.reason ?? americanIv.status}.`);
-        modelReason = "Fallback because American-model IV could not be solved.";
       }
     } catch (error) {
       warnings.push(`American pricing failed: ${error instanceof Error ? error.message : "unknown error"}`);
@@ -533,6 +547,8 @@ export function comparePricingModels({
     trinomialForecastFairValue,
     earlyExercisePremium: Math.max((americanForecastFairValue ?? bsForecastFairValue) - bsForecastFairValue, 0),
     sameTreeExercisePremium,
+    earlyExerciseMaterialityThreshold,
+    premiumThresholdComponents,
     treeDifference,
     treeStepsUsed,
     treeMaxSteps: treeSteps,
@@ -543,6 +559,10 @@ export function comparePricingModels({
     treeHistory,
     blackScholesIv: blackScholesIv.volatility,
     americanIv: americanIv.volatility,
+    blackScholesIvStatus: blackScholesIv.status,
+    blackScholesIvIterations: blackScholesIv.iterations,
+    americanIvStatus: americanIv.status,
+    americanIvIterations: americanIv.iterations,
   };
 }
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 from typing import Iterable
 
 import numpy as np
@@ -13,6 +14,15 @@ import pandas as pd
 from .black_scholes import black_scholes_greeks, black_scholes_price
 from .conditional_variance import walk_forward_garch
 from .pricing_models import PricingInputs, contract_pricing_diagnostics
+from .research_controls import (
+    classify_signal,
+    data_quality_diagnostics,
+    executable_edge_diagnostics,
+    interpolate_variance_forecast,
+    map_horizon,
+    shift_strike_volatility,
+    trading_day_dte,
+)
 from .surface import add_volatility_surface_context, prepare_surface_contracts, surface_benchmark_records
 
 
@@ -44,9 +54,9 @@ HAR_WINDOWS = (1, 5, 20)
 @dataclass(frozen=True)
 class ForecastConfig:
     horizons: tuple[int, ...] = DEFAULT_HORIZONS
-    min_train_observations: int = 30
-    training_window: int | None = 252
-    rebalance_every: int = 5
+    min_train_observations: int = 252
+    training_window: int | None = 756
+    rebalance_every: int = 21
     ewma_default_lambda: float = 0.94
     optimizer_max_iterations: int = 5_000
     optimizer_tolerance: float = 1e-12
@@ -978,6 +988,7 @@ def rank_option_contracts(
     tree_steps: int = 400,
     tree_tolerance: float = 0.0025,
     style_map: dict[str, dict[str, str]] | None = None,
+    surface_shift_method: str = "total_variance_shift",
 ) -> pd.DataFrame:
     required = ("ticker", "date", "expiration", "option_type", "strike", "market_iv", "bid", "ask", "volume", "open_interest")
     _validate_columns(options, required, "options")
@@ -986,9 +997,24 @@ def rank_option_contracts(
     ranked["date"] = pd.to_datetime(ranked["date"]).dt.normalize()
     ranked["expiration"] = pd.to_datetime(ranked["expiration"]).dt.normalize()
     if "dte" not in ranked:
-        ranked["dte"] = (ranked["expiration"] - ranked["date"]).dt.days.clip(lower=1)
+        ranked["dte"] = (ranked["expiration"] - ranked["date"]).dt.days.clip(lower=0)
     ranked["dte"] = pd.to_numeric(ranked["dte"], errors="raise")
-    ranked["forecast_horizon"] = ranked["dte"].map(lambda value: nearest_horizon(value, horizons))
+    trading_details = [trading_day_dte(origin, expiration) for origin, expiration in zip(ranked["date"], ranked["expiration"])]
+    ranked["trading_dte"] = [item[0] for item in trading_details]
+    ranked["trading_calendar_warning"] = [item[1] or "" for item in trading_details]
+    horizon_mappings = [map_horizon(value, horizons) for value in ranked["trading_dte"]]
+    ranked["forecast_horizon"] = [mapping.trading_dte for mapping in horizon_mappings]
+    ranked["forecast_horizon_method"] = [mapping.method for mapping in horizon_mappings]
+    ranked["forecast_horizon_lower"] = [mapping.lower_horizon for mapping in horizon_mappings]
+    ranked["forecast_horizon_upper"] = [mapping.upper_horizon for mapping in horizon_mappings]
+    ranked["forecast_horizon_interpolation_weight"] = [mapping.interpolation_weight for mapping in horizon_mappings]
+    ranked["forecast_horizon_ranking_eligible"] = [mapping.ranking_eligible for mapping in horizon_mappings]
+    ranked["forecast_horizon_warning"] = [mapping.warning or "" for mapping in horizon_mappings]
+    ranked["forecast_horizon_used"] = [
+        f"{mapping.lower_horizon}D" if mapping.lower_horizon == mapping.upper_horizon
+        else f"{mapping.lower_horizon}-{mapping.upper_horizon}D"
+        for mapping in horizon_mappings
+    ]
     ranked["market_iv"] = _normalize_percent(ranked["market_iv"])
     for column in ("strike", "bid", "ask", "volume", "open_interest"):
         ranked[column] = pd.to_numeric(ranked[column], errors="coerce")
@@ -1017,21 +1043,72 @@ def rank_option_contracts(
     ranked = add_volatility_surface_context(ranked, history=surface_history)
 
     lookup = _forecast_lookup(forecasts)
-    selected_rows: list[pd.Series | None] = []
+    selected_records: list[dict[str, object] | None] = []
     for row in ranked.itertuples(index=False):
-        group = lookup.get((row.ticker, int(row.forecast_horizon)))
-        if group is None or group.empty:
-            selected_rows.append(None)
+        lower_horizon = int(row.forecast_horizon_lower)
+        upper_horizon = int(row.forecast_horizon_upper)
+        component_rows: list[pd.Series] = []
+        for component_horizon in sorted({lower_horizon, upper_horizon}):
+            group = lookup.get((row.ticker, component_horizon))
+            if group is None or group.empty:
+                available_horizons = sorted(horizon for (ticker, horizon) in lookup if ticker == row.ticker)
+                fallback_horizon = min(available_horizons, key=lambda value: (abs(value - component_horizon), -value)) if available_horizons else None
+                group = lookup.get((row.ticker, fallback_horizon)) if fallback_horizon is not None else None
+            if group is None or group.empty:
+                component_rows = []
+                break
+            eligible = group[group["date"] <= row.date]
+            if eligible.empty:
+                component_rows = []
+                break
+            component_rows.append(eligible.iloc[-1])
+        if not component_rows:
+            selected_records.append(None)
             continue
-        eligible = group[group["date"] <= row.date]
-        selected_rows.append(eligible.iloc[-1] if not eligible.empty else None)
-    ranked["forecast_vol"] = [row["forecast_vol"] if row is not None else np.nan for row in selected_rows]
-    ranked["forecast_as_of"] = [row["date"] if row is not None else pd.NaT for row in selected_rows]
-    ranked["forecast_model_used"] = [row["model_used"] if row is not None else None for row in selected_rows]
-    ranked["lambda_used"] = [row["lambda_used"] if row is not None else np.nan for row in selected_rows]
-    ranked["weights_used"] = [row["weights_used"] if row is not None else None for row in selected_rows]
-    ranked["parameters_used"] = [row.get("parameters_used") if row is not None else None for row in selected_rows]
-    ranked["future_realized_vol"] = [row["future_realized_vol"] if row is not None else np.nan for row in selected_rows]
+        if len(component_rows) == 1:
+            forecast_vol = float(component_rows[0]["forecast_vol"])
+            future_vol = float(component_rows[0].get("future_realized_vol", np.nan))
+        else:
+            weight = float(row.forecast_horizon_interpolation_weight)
+            forecast_vol = interpolate_variance_forecast(
+                float(component_rows[0]["forecast_vol"]), float(component_rows[1]["forecast_vol"]), weight,
+            )
+            future_components = [float(component.get("future_realized_vol", np.nan)) for component in component_rows]
+            future_vol = interpolate_variance_forecast(*future_components, weight) if np.isfinite(future_components).all() else np.nan
+        selected_records.append({
+            "forecast_vol": forecast_vol,
+            "forecast_as_of": min(pd.Timestamp(component["date"]) for component in component_rows),
+            "forecast_model_used": " + ".join(dict.fromkeys(str(component["model_used"]) for component in component_rows)),
+            "lambda_used": component_rows[0].get("lambda_used") if len(component_rows) == 1 else np.nan,
+            "weights_used": component_rows[0].get("weights_used") if len(component_rows) == 1 else {
+                str(int(component["horizon"])): component.get("weights_used") for component in component_rows
+            },
+            "parameters_used": component_rows[0].get("parameters_used") if len(component_rows) == 1 else {
+                str(int(component["horizon"])): component.get("parameters_used") for component in component_rows
+            },
+            "future_realized_vol": future_vol,
+        })
+    ranked["forecast_atm_vol"] = [record["forecast_vol"] if record is not None else np.nan for record in selected_records]
+    ranked["forecast_as_of"] = [record["forecast_as_of"] if record is not None else pd.NaT for record in selected_records]
+    ranked["forecast_model_used"] = [record["forecast_model_used"] if record is not None else None for record in selected_records]
+    ranked["lambda_used"] = [record["lambda_used"] if record is not None else np.nan for record in selected_records]
+    ranked["weights_used"] = [record["weights_used"] if record is not None else None for record in selected_records]
+    ranked["parameters_used"] = [record["parameters_used"] if record is not None else None for record in selected_records]
+    ranked["future_realized_vol"] = [record["future_realized_vol"] if record is not None else np.nan for record in selected_records]
+    surface_shifts = [
+        shift_strike_volatility(
+            float(row.svi_fitted_iv) if row.svi_status == "fitted" and np.isfinite(row.svi_fitted_iv) else float(row.market_iv),
+            float(row.atm_iv),
+            float(row.forecast_atm_vol),
+            time_years=max(float(row.dte) / 365.0, 1e-12),
+            method=surface_shift_method,
+        )
+        for row in ranked.itertuples(index=False)
+    ]
+    ranked["forecast_vol"] = [item["volatility"] for item in surface_shifts]
+    ranked["skew_adjustment_method"] = [item["method"] for item in surface_shifts]
+    ranked["surface_sanity_status"] = [item["status"] for item in surface_shifts]
+    ranked["surface_shift_warning"] = [item["warning"] for item in surface_shifts]
     ranked = ranked.dropna(subset=["spot", "strike", "market_iv", "forecast_vol", "market_mid", "bid", "ask"])
 
     ranked["underlying_price"] = ranked["spot"]
@@ -1068,6 +1145,8 @@ def rank_option_contracts(
             style_map=style_map,
             tree_steps=tree_steps,
             tree_tolerance=tree_tolerance,
+            market_bid=float(row.bid),
+            market_ask=float(row.ask),
         ))
     pricing_frame = pd.DataFrame(pricing_rows, index=ranked.index)
     # Avoid duplicate source columns (for example instrument_type supplied by a
@@ -1114,9 +1193,20 @@ def rank_option_contracts(
         ranked["spread"] / ranked["market_mid"] * 100.0,
         np.inf,
     )
+    executable_rows = [
+        executable_edge_diagnostics(row.selected_model_fair_value, row.market_mid, row.bid, row.ask)
+        for row in ranked.itertuples(index=False)
+    ]
+    ranked["midpoint_edge"] = [item.get("midpoint_edge", np.nan) for item in executable_rows]
+    ranked["long_executable_edge"] = [item.get("long_executable_edge", np.nan) for item in executable_rows]
+    ranked["short_executable_edge"] = [item.get("short_executable_edge", np.nan) for item in executable_rows]
+    ranked["minimum_edge_threshold"] = [item.get("minimum_edge", np.nan) for item in executable_rows]
+    ranked["long_minimum_edge_threshold_passed"] = [bool(item.get("long_threshold_passed", False)) for item in executable_rows]
+    ranked["short_minimum_edge_threshold_passed"] = [bool(item.get("short_threshold_passed", False)) for item in executable_rows]
+    ranked["edge_to_spread_ratio_long"] = [item.get("long_edge_to_spread_ratio", np.nan) for item in executable_rows]
+    ranked["edge_to_spread_ratio_short"] = [item.get("short_edge_to_spread_ratio", np.nan) for item in executable_rows]
     ranked["edge_after_spread_bs"] = np.where(
-        ranked["price_edge_bs"] >= 0,
-        ranked["bs_forecast_vol_fair_value"] - ranked["ask"],
+        ranked["price_edge_bs"] >= 0, ranked["bs_forecast_vol_fair_value"] - ranked["ask"],
         ranked["bid"] - ranked["bs_forecast_vol_fair_value"],
     )
     ranked["edge_after_spread_american"] = np.where(
@@ -1136,11 +1226,11 @@ def rank_option_contracts(
         default="neutral",
     )
     ranked["edge_after_bid_ask"] = np.where(
-        ranked["price_edge"] >= 0,
-        ranked["model_fair_value"] - ranked["ask"],
-        ranked["bid"] - ranked["model_fair_value"],
+        ranked["candidate_side"] == "long_vol", ranked["long_executable_edge"],
+        np.where(ranked["candidate_side"] == "short_vol", ranked["short_executable_edge"],
+                 np.maximum(ranked["long_executable_edge"], ranked["short_executable_edge"])),
     )
-    execution_reference = np.where(ranked["price_edge"] >= 0, ranked["ask"], ranked["bid"])
+    execution_reference = np.where(ranked["candidate_side"] == "long_vol", ranked["ask"], ranked["bid"])
     ranked["edge_after_bid_ask_pct"] = np.where(
         execution_reference > 0,
         ranked["edge_after_bid_ask"] / execution_reference * 100.0,
@@ -1149,46 +1239,48 @@ def rank_option_contracts(
     ranked["liquidity_pass"] = (
         ((ranked["volume"] >= minimum_volume) | (ranked["open_interest"] >= minimum_open_interest))
         & (ranked["spread_pct"] <= max_spread_percent)
-        & (ranked["ask"] >= ranked["bid"])
+        & (ranked["ask"] > ranked["bid"])
         & (ranked["market_mid"] >= 0.10)
+        & (ranked["vega"] >= 0.01)
     )
-    def data_warnings(row: pd.Series) -> str:
-        items: list[str] = []
-        if row["ask"] < row["bid"]:
-            items.append("invalid bid/ask")
-        if row["spread_pct"] > max_spread_percent:
-            items.append("wide bid-ask spread")
-        if row["volume"] < minimum_volume:
-            items.append("low volume")
-        if row["open_interest"] < minimum_open_interest:
-            items.append("low open interest")
-        if not bool(row["dividend_data_available"]):
-            items.append("dividend data unavailable; 0% continuous yield assumed")
-        return "; ".join(items)
-
-    ranked["data_quality_warning"] = ranked.apply(data_warnings, axis=1)
-    ranked["pricing_warning"] = [
-        "; ".join(part for part in (str(pricing or "").strip(), str(data or "").strip()) if part)
-        for pricing, data in zip(ranked["pricing_warning"], ranked["data_quality_warning"])
-    ]
-    # Liquidity and observable-data quality are part of confidence, not an
-    # afterthought applied only to the final rank.
-    liquidity_confidence = np.where(
-        ranked["liquidity_pass"], 1.0,
-        np.where(ranked["ask"] >= ranked["bid"], 0.55, 0.0),
+    quality_rows = [data_quality_diagnostics(row) for _, row in ranked.iterrows()]
+    for column in (
+        "data_quality_state", "data_quality_score", "data_quality_warning", "data_quality_pass",
+        "quote_timestamp_available", "underlying_timestamp_available", "quote_freshness_basis",
+    ):
+        ranked[column] = [item[column] for item in quality_rows]
+    ranked["forecast_age_days"] = (ranked["date"] - pd.to_datetime(ranked["forecast_as_of"])).dt.days
+    ranked["forecast_stale"] = ranked["forecast_age_days"].isna() | (ranked["forecast_age_days"] > 4)
+    ranked["forecast_freshness_warning"] = np.where(
+        ranked["forecast_stale"], "Forecast file/record is stale for the contract date.", "",
     )
-    ranked["model_confidence"] = (
-        0.75 * ranked["model_confidence"].astype(float) + 0.25 * liquidity_confidence
-    ).clip(lower=0.0, upper=1.0)
+    ranked["rate_source"] = ranked["rate_source"] if "rate_source" in ranked else "unspecified_treasury_or_manual_proxy"
+    ranked["rate_timestamp"] = pd.to_datetime(ranked["rate_timestamp"], errors="coerce", utc=True) if "rate_timestamp" in ranked else pd.NaT
+    ranked["rate_for_expiration"] = ranked["rate"]
+    ranked["rate_warning"] = ranked["rate_warning"] if "rate_warning" in ranked else "Rate provenance unavailable; treat as a proxy input."
+    ranked["dividend_method"] = ranked["dividend_method"] if "dividend_method" in ranked else ranked["dividend_model"]
+    ranked["dividend_schedule"] = ranked["discrete_dividends"] if "discrete_dividends" in ranked else None
+    ranked["dividend_warning"] = ranked["dividend_warning"] if "dividend_warning" in ranked else np.where(
+        ranked["dividend_data_available"], "", "Dividend data unavailable; 0% continuous yield assumed.",
+    )
+    ranked["carry_estimate_method"] = ranked["carry_estimate_method"] if "carry_estimate_method" in ranked else "input dividend/cash-flow schedule"
+    ranked["double_counting_guard"] = np.where(ranked["discrete_dividend_count"] > 0, "continuous dividend yield must be zero", "not_applicable")
+    ranked["event_risk_flag"] = ranked["event_risk_flag"] if "event_risk_flag" in ranked else False
+    ranked["event_type"] = ranked["event_type"] if "event_type" in ranked else None
+    ranked["event_date"] = ranked["event_date"] if "event_date" in ranked else pd.NaT
+    ranked["event_data_source"] = ranked["event_data_source"] if "event_data_source" in ranked else "unavailable"
+    ranked["event_warning"] = ranked["event_warning"] if "event_warning" in ranked else "Scheduled event calendar unavailable; high IV is not automatically rich."
+    ranked["jump_risk_warning"] = "Forecast-vol scenario does not fully price jump risk."
     ranked["liquidity_score"] = np.log1p(ranked["volume"].clip(lower=0)) + 0.5 * np.log1p(ranked["open_interest"].clip(lower=0))
     ranked["surface_numerical_pass"] = (
-        (ranked["svi_status"] != "fitted")
+        (ranked["surface_sanity_status"] == "pass")
+        & ((ranked["svi_status"] != "fitted")
         | (
             ~ranked["svi_outlier"].astype(bool)
             & ranked["svi_butterfly_arbitrage_free"].astype(bool)
             & ranked["svi_calendar_arbitrage_free"].astype(bool)
             & ranked["svi_parameter_constraints_satisfied"].astype(bool)
-        )
+        ))
     )
     ranked["surface_context_pass"] = np.select(
         [
@@ -1207,15 +1299,84 @@ def rank_option_contracts(
         ["historical bucket unavailable", "SVI outlier/static-arbitrage diagnostic failed", "confirmed relative to historical bucket"],
         default="not extreme versus historical bucket",
     )
-    ranked["abs_price_edge"] = ranked["price_edge"].abs()
-    ranked["abs_vol_edge"] = ranked["vol_edge"].abs()
-    ranked["abs_gamma_weighted_edge"] = ranked["gamma_weighted_edge"].abs()
-    grouped = ranked.groupby(["ticker", "date"], group_keys=False)
-    ranked["price_edge_score"] = grouped["abs_price_edge"].rank(pct=True)
-    ranked["vol_edge_score"] = grouped["abs_vol_edge"].rank(pct=True)
-    ranked["executable_edge_score"] = grouped["edge_after_bid_ask"].rank(pct=True)
-    ranked["liquidity_rank_score"] = grouped["liquidity_score"].rank(pct=True)
-    ranked["gamma_edge_score"] = grouped["abs_gamma_weighted_edge"].rank(pct=True)
+    model_pass = (
+        (ranked["option_style"] == "european")
+        | ranked["tree_convergence_status"].eq("converged")
+        | ranked["model_reason"].str.contains("premium is below", case=False, na=False)
+    )
+    classifications = [
+        classify_signal(
+            row.forecast_vol, row.market_iv, executable_rows[position],
+            data_pass=bool(row.data_quality_pass and row.forecast_horizon_ranking_eligible and not row.forecast_stale),
+            model_pass=bool(model_pass.iloc[position]),
+            surface_pass=bool(row.surface_numerical_pass),
+        )
+        for position, row in enumerate(ranked.itertuples(index=False))
+    ]
+    ranked["candidate_classification"] = [item[0] for item in classifications]
+    ranked["candidate_reason"] = [item[1] for item in classifications]
+    ranked["minimum_edge_threshold_passed"] = np.where(
+        ranked["candidate_side"] == "long_vol", ranked["long_minimum_edge_threshold_passed"],
+        np.where(ranked["candidate_side"] == "short_vol", ranked["short_minimum_edge_threshold_passed"], False),
+    )
+    ranked["edge_to_spread_ratio"] = np.where(
+        ranked["candidate_side"] == "long_vol", ranked["edge_to_spread_ratio_long"],
+        np.where(ranked["candidate_side"] == "short_vol", ranked["edge_to_spread_ratio_short"], np.nan),
+    )
+    ranked["edge_to_vega_ratio"] = np.where(ranked["vega"] > 1e-12, ranked["edge_after_bid_ask"] / ranked["vega"], np.nan)
+    ranked["edge_to_option_price_ratio"] = np.where(ranked["market_mid"] > 0, ranked["edge_after_bid_ask"] / ranked["market_mid"], np.nan)
+
+    historical_confidence = np.minimum(ranked["iv_percentile_observations"].fillna(0) / 60.0, 1.0)
+    horizon_confidence = ranked["forecast_horizon_method"].map({"exact": 1.0, "interpolated": 0.85, "extrapolated": 0.35, "unavailable": 0.0}).fillna(0.0)
+    surface_confidence = np.where(ranked["surface_numerical_pass"], np.where(ranked["svi_status"] == "fitted", 0.95, 0.65), 0.15)
+    forecast_validation_confidence = 0.55  # until live artifact carries per-record validation/stability metrics
+    rate_confidence = np.where(ranked["rate_timestamp"].notna(), 0.8, 0.45)
+    dividend_confidence = np.where(ranked["dividend_data_available"], 0.7, 0.3)
+    event_confidence = np.where(ranked["event_data_source"] != "unavailable", 0.8, 0.0)
+    confidence_components = []
+    combined_confidence = []
+    for position, row in enumerate(ranked.itertuples(index=False)):
+        components = {
+            "data_quality": float(row.data_quality_score),
+            "forecast_freshness": 0.0 if row.forecast_stale else 1.0,
+            "horizon_match": float(horizon_confidence.iloc[position]),
+            "forecast_validation": forecast_validation_confidence,
+            "surface_quality": float(surface_confidence[position]),
+            "historical_context": float(historical_confidence.iloc[position]),
+            "pricing_stability": float(row.model_confidence),
+            "rate_quality": float(rate_confidence[position]),
+            "dividend_quality": float(dividend_confidence[position]),
+            "event_coverage": float(event_confidence[position]),
+        }
+        weights = {"data_quality": .28, "forecast_freshness": .10, "horizon_match": .10, "forecast_validation": .12,
+                   "surface_quality": .10, "historical_context": .08, "pricing_stability": .10,
+                   "rate_quality": .04, "dividend_quality": .04, "event_coverage": .04}
+        value = sum(components[name] * weights[name] for name in weights)
+        confidence_components.append({name: {"value": components[name], "weight": weights[name]} for name in weights})
+        combined_confidence.append(min(max(value, 0.0), 1.0))
+    ranked["pricing_model_confidence"] = ranked["model_confidence"]
+    ranked["model_confidence"] = combined_confidence
+    ranked["model_confidence_components"] = confidence_components
+    ranked["model_confidence_calibrated"] = False
+
+    ranked["directional_price_edge"] = np.maximum(np.where(
+        ranked["candidate_side"] == "long_vol", ranked["long_executable_edge"],
+        np.where(ranked["candidate_side"] == "short_vol", ranked["short_executable_edge"], 0.0),
+    ), 0.0)
+    ranked["directional_vol_edge"] = np.maximum(np.where(
+        ranked["candidate_side"] == "long_vol", ranked["vol_edge"],
+        np.where(ranked["candidate_side"] == "short_vol", -ranked["vol_edge"], 0.0),
+    ), 0.0)
+    ranked["directional_gamma_edge"] = np.maximum(np.where(
+        ranked["candidate_side"] == "short_vol", ranked["gamma_weighted_edge"],
+        np.where(ranked["candidate_side"] == "long_vol", -ranked["gamma_weighted_edge"], 0.0),
+    ), 0.0)
+    directional_group = ranked.groupby(["ticker", "date", "candidate_side"], group_keys=False)
+    ranked["price_edge_score"] = directional_group["directional_price_edge"].rank(pct=True).fillna(0.0)
+    ranked["vol_edge_score"] = directional_group["directional_vol_edge"].rank(pct=True).fillna(0.0)
+    ranked["executable_edge_score"] = directional_group["edge_after_bid_ask"].rank(pct=True).fillna(0.0)
+    ranked["liquidity_rank_score"] = directional_group["liquidity_score"].rank(pct=True).fillna(0.0)
+    ranked["gamma_edge_score"] = directional_group["directional_gamma_edge"].rank(pct=True).fillna(0.0)
     ranked["surface_context_score"] = np.where(
         ranked["candidate_side"] == "long_vol",
         ((50.0 - ranked["iv_percentile"]) / 50.0).clip(lower=0.0, upper=1.0),
@@ -1225,8 +1386,8 @@ def rank_option_contracts(
             0.0,
         ),
     )
-    ranked["surface_context_score"] = ranked["surface_context_score"].fillna(0.0)
-    ranked["composite_score"] = (
+    ranked["surface_context_score"] = ranked["surface_context_score"].fillna(0.0) * historical_confidence
+    ranked["raw_heuristic_score"] = (
         0.25 * ranked["price_edge_score"]
         + 0.15 * ranked["vol_edge_score"]
         + 0.25 * ranked["executable_edge_score"]
@@ -1235,13 +1396,33 @@ def rank_option_contracts(
         + 0.05 * ranked["liquidity_rank_score"]
         + 0.05 * ranked["model_confidence"]
     )
+    ranked["data_penalty"] = ranked["data_quality_score"] * np.where(ranked["data_quality_pass"], 1.0, 0.35)
+    ranked["liquidity_penalty"] = np.where(ranked["liquidity_pass"], 1.0, 0.25)
+    ranked["direction_penalty"] = np.where(ranked["candidate_classification"].isin(["long_vol_candidate", "short_vol_candidate"]), 1.0, 0.0)
+    ranked["composite_score"] = (
+        ranked["raw_heuristic_score"] * ranked["model_confidence"] * ranked["data_penalty"] *
+        ranked["liquidity_penalty"] * ranked["direction_penalty"]
+    )
+    ranked["ranking_score_calibrated"] = False
+    ranked["ranking_score_warning"] = "Heuristic weights are not validated on a sufficient quote-level walk-forward outcome sample."
+    ranked["score_components"] = [
+        {
+            "price_edge": float(row.price_edge_score), "vol_edge": float(row.vol_edge_score),
+            "executable_edge": float(row.executable_edge_score), "gamma_edge": float(row.gamma_edge_score),
+            "surface_context": float(row.surface_context_score), "liquidity": float(row.liquidity_rank_score),
+            "confidence": float(row.model_confidence), "data_penalty": float(row.data_penalty),
+            "liquidity_penalty": float(row.liquidity_penalty), "direction_penalty": float(row.direction_penalty),
+        }
+        for row in ranked.itertuples(index=False)
+    ]
     ranked["research_bucket"] = np.select(
         [
-            ranked["liquidity_pass"] & ranked["surface_context_pass"]
-            & ranked["candidate_side"].isin(["long_vol", "short_vol"])
-            & (ranked["edge_after_bid_ask"] > 0) & (ranked["composite_score"] >= 0.80),
-            ranked["liquidity_pass"] & (ranked["edge_after_bid_ask"] > 0),
-            ranked["liquidity_pass"],
+            ranked["liquidity_pass"] & ranked["data_quality_pass"] & ranked["surface_context_pass"]
+            & ranked["candidate_classification"].isin(["long_vol_candidate", "short_vol_candidate"])
+            & (ranked["model_confidence"] >= 0.70) & (ranked["composite_score"] >= 0.50),
+            ranked["liquidity_pass"] & ranked["data_quality_pass"]
+            & ranked["candidate_classification"].isin(["long_vol_candidate", "short_vol_candidate"]),
+            ranked["liquidity_pass"] & ranked["candidate_side"].isin(["long_vol", "short_vol"]),
         ],
         ["A - strongest research candidate", "B - watchlist / needs trigger", "C - screen flag only"],
         default="Reject",
@@ -1251,7 +1432,10 @@ def rank_option_contracts(
         np.sign(ranked["vol_edge"]) == np.sign(ranked["future_realized_vol"] - ranked["market_iv"]),
         np.nan,
     )
-    ranked["contract_rank"] = grouped["composite_score"].rank(method="first", ascending=False).astype(int)
+    ranked["rh_iv"] = ranked["market_iv"]
+    ranked["edge_after_spread"] = ranked["edge_after_bid_ask"]
+    rank_group = ranked.groupby(["ticker", "date", "candidate_side"], group_keys=False)
+    ranked["contract_rank"] = rank_group["composite_score"].rank(method="first", ascending=False).astype(int)
 
     required_output = [
         "ticker", "underlying_price", "date", "expiration", "dte", "option_type", "strike",
@@ -1267,12 +1451,20 @@ def rank_option_contracts(
         "parameters_used",
     ]
     extras = [
-        "forecast_as_of", "forecast_horizon", "spot", "rate", "dividend", "option_style",
+        "forecast_as_of", "forecast_horizon", "forecast_atm_vol", "trading_dte",
+        "forecast_horizon_used", "forecast_horizon_method", "forecast_horizon_lower",
+        "forecast_horizon_upper", "forecast_horizon_interpolation_weight", "forecast_horizon_ranking_eligible",
+        "forecast_horizon_warning", "trading_calendar_warning", "forecast_age_days", "forecast_stale",
+        "forecast_freshness_warning", "spot", "rate", "dividend", "option_style",
         "style_verified", "instrument_type", "dividend_data_available", "research_direction",
-        "edge_after_bid_ask", "edge_after_bid_ask_pct", "liquidity_pass", "composite_score",
+        "midpoint_edge", "long_executable_edge", "short_executable_edge", "edge_after_spread",
+        "edge_after_bid_ask", "edge_after_bid_ask_pct", "edge_to_spread_ratio", "edge_to_vega_ratio",
+        "edge_to_option_price_ratio", "minimum_edge_threshold", "minimum_edge_threshold_passed",
+        "liquidity_pass", "composite_score", "raw_heuristic_score", "score_components",
+        "ranking_score_calibrated", "ranking_score_warning", "data_penalty", "liquidity_penalty", "direction_penalty",
         "research_bucket", "contract_rank", "future_realized_vol", "direction_correct_vs_market_iv",
         "dollar_gamma", "gamma_weighted_edge", "vega_normalized_edge",
-        "gamma_weighted_edge_contract", "contract_multiplier", "candidate_side",
+        "gamma_weighted_edge_contract", "contract_multiplier", "candidate_side", "candidate_classification", "candidate_reason",
         "moneyness", "log_moneyness", "moneyness_bucket", "dte_bucket", "atm_iv",
         "spot_log_moneyness", "forward_price", "atm_iv_source",
         "contract_iv_minus_atm_iv", "iv_skew_slope_per_10pct_moneyness",
@@ -1280,7 +1472,8 @@ def rank_option_contracts(
         "term_spread_2d_minus_1d", "term_spread_5d_minus_2d", "term_spread_10d_minus_5d",
         "iv_percentile", "iv_percentile_observations", "historical_bucket_iv_median",
         "iv_minus_historical_bucket_median", "surface_context_pass", "surface_context_status",
-        "surface_numerical_pass", "svi_status", "svi_fitted_iv", "svi_residual_iv",
+        "surface_numerical_pass", "surface_sanity_status", "surface_shift_warning", "skew_adjustment_method",
+        "svi_status", "svi_fitted_iv", "svi_residual_iv",
         "svi_robust_weight", "svi_outlier", "svi_a", "svi_b", "svi_rho", "svi_m", "svi_sigma",
         "svi_rmse_total_variance", "svi_minimum_butterfly_g", "svi_butterfly_arbitrage_free",
         "svi_parameter_constraints_satisfied", "svi_calendar_arbitrage_free",
@@ -1289,13 +1482,22 @@ def rank_option_contracts(
         "trinomial_market_iv_fair_value", "approximation_market_iv_fair_value",
         "binomial_forecast_vol_fair_value", "trinomial_forecast_vol_fair_value",
         "approximation_forecast_vol_fair_value", "binomial_american_iv", "trinomial_american_iv",
-        "selected_model_iv", "iv_solver_status", "iv_solver_warning", "tree_early_exercise_premium",
+        "rh_iv", "calc_bs_iv", "calc_selected_model_iv", "american_iv",
+        "selected_model_iv", "iv_solver_status", "iv_solver_iterations", "iv_solver_warning",
+        "black_scholes_iv_solver_status", "black_scholes_iv_solver_iterations", "black_scholes_iv_solver_warning",
+        "american_iv_solver_status", "american_iv_solver_iterations", "american_iv_solver_warning",
+        "tree_early_exercise_premium", "early_exercise_materiality_threshold", "early_exercise_threshold_components",
         "tree_model_difference", "tree_convergence_status", "price_edge", "model_fair_value",
         "tree_steps_used", "tree_max_steps", "tree_convergence_error", "tree_convergence_tolerance",
         "tree_numerical_method", "tree_convergence_history", "dividend_model",
         "cash_dividend_present_value", "discrete_dividend_count", "black_scholes_runtime_ms", "binomial_runtime_ms",
         "trinomial_runtime_ms", "approximation_runtime_ms", "selected_model_runtime_ms",
-        "market_iv_fair_value", "forecast_vol",
+        "market_iv_fair_value", "forecast_vol", "pricing_model_confidence", "model_confidence_components",
+        "model_confidence_calibrated", "data_quality_state", "data_quality_score", "data_quality_pass",
+        "quote_timestamp_available", "underlying_timestamp_available", "quote_freshness_basis",
+        "rate_source", "rate_timestamp", "rate_for_expiration", "rate_warning", "dividend_method",
+        "dividend_schedule", "dividend_warning", "carry_estimate_method", "double_counting_guard",
+        "event_risk_flag", "event_type", "event_date", "event_warning", "event_data_source", "jump_risk_warning",
     ]
     return ranked[required_output + extras].sort_values(["ticker", "date", "contract_rank"]).reset_index(drop=True)
 
@@ -1303,13 +1505,62 @@ def rank_option_contracts(
 def latest_forecast_payload(
     forecasts: pd.DataFrame,
     surface_history: pd.DataFrame | None = None,
+    diagnostics: pd.DataFrame | None = None,
+    model_selection_history: pd.DataFrame | None = None,
+    price_features: pd.DataFrame | None = None,
+    config: ForecastConfig | None = None,
 ) -> dict:
     _validate_columns(forecasts, ("ticker", "date", "horizon", "model", "forecast_vol", "model_used"), "forecasts")
     best = forecasts[forecasts["model"] == "best_model"].copy()
     best["date"] = pd.to_datetime(best["date"]).dt.normalize()
     latest = best.sort_values("date").groupby(["ticker", "horizon"], as_index=False).tail(1)
+    effective_config = config or ForecastConfig()
+    generated_at = datetime.now(timezone.utc)
     records = []
     for row in latest.itertuples(index=False):
+        group = best[(best["ticker"] == row.ticker) & (best["horizon"] == row.horizon)].sort_values("date")
+        completed = group[group["future_realized_vol"].notna()] if "future_realized_vol" in group else group.iloc[0:0]
+        recent_models = group["model_used"].dropna().astype(str).tail(12)
+        stability = float((recent_models == str(row.model_used)).mean()) if not recent_models.empty else math.nan
+        leaderboard: list[dict[str, object]] = []
+        selected_diagnostic: dict[str, object] | None = None
+        if diagnostics is not None and not diagnostics.empty:
+            diagnostic_slice = diagnostics[
+                (diagnostics["ticker"] == row.ticker)
+                & (diagnostics["horizon"] == row.horizon)
+                & (diagnostics["moneyness_bucket"] == "all")
+            ].sort_values("mse_variance")
+            leaderboard = [
+                {
+                    "model": str(item.model),
+                    "mse_variance": float(item.mse_variance),
+                    "mae_vol": float(item.mae_vol),
+                    "rmse_vol": float(item.rmse_vol),
+                    "mean_qlike": None if pd.isna(item.mean_qlike) else float(item.mean_qlike),
+                    "variance_bias": None if pd.isna(getattr(item, "variance_bias", None)) else float(item.variance_bias),
+                    "observations": int(item.observations),
+                }
+                for item in diagnostic_slice.head(8).itertuples(index=False)
+            ]
+            selected_match = diagnostic_slice[diagnostic_slice["model"] == str(row.model_used)]
+            if not selected_match.empty:
+                item = selected_match.iloc[0]
+                selected_diagnostic = {
+                    "mse_variance": float(item["mse_variance"]),
+                    "mae_vol": float(item["mae_vol"]),
+                    "rmse_vol": float(item["rmse_vol"]),
+                    "mean_qlike": None if pd.isna(item.get("mean_qlike")) else float(item["mean_qlike"]),
+                    "variance_bias": None if pd.isna(item.get("variance_bias")) else float(item["variance_bias"]),
+                    "calibration_intercept": None if pd.isna(item.get("mz_intercept")) else float(item["mz_intercept"]),
+                    "calibration_slope": None if pd.isna(item.get("mz_slope")) else float(item["mz_slope"]),
+                }
+        rebalance_dates: list[str] = []
+        if model_selection_history is not None and not model_selection_history.empty:
+            history_slice = model_selection_history[
+                (model_selection_history["ticker"] == row.ticker)
+                & (model_selection_history["horizon"] == row.horizon)
+            ]
+            rebalance_dates = [pd.Timestamp(value).date().isoformat() for value in history_slice["date"].drop_duplicates().tail(24)]
         records.append({
             "ticker": str(row.ticker),
             "as_of_date": pd.Timestamp(row.date).date().isoformat(),
@@ -1319,15 +1570,51 @@ def latest_forecast_payload(
             "lambda_used": None if pd.isna(row.lambda_used) else float(row.lambda_used),
             "weights_used": row.weights_used if isinstance(row.weights_used, dict) else None,
             "parameters_used": row.parameters_used if isinstance(row.parameters_used, dict) else None,
+            "training_rows": int(min(len(completed), effective_config.training_window or len(completed))),
+            "validation_rows": int(len(completed)),
+            "minimum_training_rows": int(effective_config.min_train_observations),
+            "maximum_training_rows": effective_config.training_window,
+            "rebalance_every": int(effective_config.rebalance_every),
+            "rebalancing_dates": rebalance_dates,
+            "selected_model_stability_last_12": None if pd.isna(stability) else stability,
+            "selected_model_diagnostics": selected_diagnostic,
+            "candidate_model_leaderboard": leaderboard,
+            "parameter_train_end": None if pd.isna(getattr(row, "parameter_train_end", pd.NaT)) else pd.Timestamp(row.parameter_train_end).isoformat(),
+            "stale_at_generation": (generated_at.date() - pd.Timestamp(row.date).date()).days > 4,
         })
+    jump_diagnostics: list[dict[str, object]] = []
+    if price_features is not None and not price_features.empty and "log_return" in price_features:
+        for ticker, group in price_features.groupby("ticker"):
+            values = pd.to_numeric(group.sort_values("date")["log_return"], errors="coerce").dropna().tail(756)
+            reference = values.tail(252)
+            scale = float(reference.std(ddof=1)) if len(reference) >= 20 else math.nan
+            threshold = 3.0 * scale if math.isfinite(scale) else math.nan
+            jumps = values[np.abs(values - values.median()) >= threshold] if math.isfinite(threshold) and threshold > 0 else values.iloc[0:0]
+            jump_diagnostics.append({
+                "ticker": str(ticker), "method": "absolute return >= 3 rolling-standard-deviations",
+                "observations": int(len(values)), "reference_scale": scale,
+                "jump_threshold": threshold, "jump_count": int(len(jumps)),
+                "jump_frequency": float(len(jumps) / len(values)) if len(values) else None,
+                "mean_absolute_jump": float(np.abs(jumps).mean()) if len(jumps) else None,
+                "warning": "Historical jump statistic is diagnostic; scheduled event risk is not modeled.",
+            })
     return {
         "schema": "volatility_forecast.v1",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at.isoformat(),
         "volatility_unit": "annualized_percent",
         "variance_unit": "annualized_decimal_squared",
         "horizons": sorted({int(record["horizon"]) for record in records}),
         "records": records,
         "surface_benchmarks": surface_benchmark_records(surface_history) if surface_history is not None else [],
+        "forecast_configuration": {
+            "min_train_observations": effective_config.min_train_observations,
+            "training_window": effective_config.training_window,
+            "rebalance_every": effective_config.rebalance_every,
+            "horizons": list(effective_config.horizons),
+        },
+        "jump_diagnostics": jump_diagnostics,
+        "event_calendar": {"status": "unavailable", "warning": "No CPI/FOMC/jobs/earnings calendar is bundled; event risk is not inferred."},
+        "intraday_model": {"status": "unavailable", "warning": "Daily close-to-close forecasts cannot support high-confidence 0DTE ranking."},
     }
 
 

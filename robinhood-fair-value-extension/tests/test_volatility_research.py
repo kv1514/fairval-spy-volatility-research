@@ -39,7 +39,11 @@ from volatility_research.conditional_variance import (  # noqa: E402
 )
 from volatility_research.paper_backtest import (  # noqa: E402
     build_forward_outcomes,
+    build_multi_horizon_outcomes,
+    edge_calibration_dashboard,
     evaluate_signal_regression,
+    false_positive_dashboard,
+    outcome_dashboard,
     walk_forward_signal_regression,
 )
 from volatility_research.surface import (  # noqa: E402
@@ -48,6 +52,13 @@ from volatility_research.surface import (  # noqa: E402
     prepare_surface_contracts,
     svi_butterfly_g,
     svi_total_variance,
+)
+from volatility_research.research_controls import (  # noqa: E402
+    data_quality_diagnostics,
+    interpolate_variance_forecast,
+    map_horizon,
+    shift_strike_volatility,
+    trading_day_dte,
 )
 
 
@@ -248,6 +259,8 @@ class PaperOutcomeRegressionTests(unittest.TestCase):
                 "spot": 500.0, "varianceEdge": edge / 1000.0,
                 "gammaWeightedEdge": edge, "vegaNormalizedEdge": edge / 5.0,
                 "edgePercent": edge, "marketIv": 20.0, "forecastAtmIv": 22.0,
+                "volEdge": 2.0, "ivPercentile": 50.0 + index / 10.0,
+                "edgeToSpreadRatio": edge / 2.0,
                 "days": 5.0, "volume": 100 + index, "openInterest": 500 + index,
             }
             records.append({
@@ -277,6 +290,69 @@ class PaperOutcomeRegressionTests(unittest.TestCase):
         self.assertTrue((pd.to_datetime(valid["regressionTrainEnd"], utc=True) < pd.to_datetime(valid["signalTime"], utc=True)).all())
         diagnostics = evaluate_signal_regression(predicted)
         self.assertGreater(int(diagnostics.loc[0, "observations"]), 50)
+
+    def test_multi_horizon_dashboard_keeps_executable_outcomes_and_attribution(self) -> None:
+        outcomes = build_multi_horizon_outcomes(self._paper_records(20))
+        self.assertFalse(outcomes.empty)
+        self.assertTrue({"underlyingMove", "marketIvChange", "spreadChange", "thetaDecayEstimate", "realizedVarianceProxy"}.issubset(outcomes.columns))
+        self.assertTrue((outcomes["entryExecutable"] == 1.05).all())
+        dashboard = outcome_dashboard(outcomes)
+        self.assertGreater(int(dashboard["observations"].sum()), 0)
+        calibration = edge_calibration_dashboard(outcomes)
+        self.assertEqual(set(calibration["metric"]), {"model_edge", "vol_edge", "iv_percentile", "spread_adjusted_edge"})
+        self.assertGreater(int(calibration["observations"].sum()), 0)
+        false_positives = false_positive_dashboard(outcomes)
+        self.assertTrue({"falsePositiveRate", "p10FalsePositivePnl"}.issubset(false_positives.columns))
+
+
+class ResearchControlTests(unittest.TestCase):
+    def test_production_defaults_enforce_a_full_training_year(self) -> None:
+        config = ForecastConfig()
+        self.assertEqual(config.min_train_observations, 252)
+        self.assertEqual(config.training_window, 756)
+        self.assertEqual(config.rebalance_every, 21)
+
+    def test_trading_dte_and_variance_interpolation(self) -> None:
+        trading_dte, warning = trading_day_dte("2026-08-14", "2026-08-17")
+        self.assertEqual(trading_dte, 1)
+        self.assertIn("weekday", warning)
+        mapping = map_horizon(4)
+        self.assertEqual(mapping.method, "interpolated")
+        self.assertEqual((mapping.lower_horizon, mapping.upper_horizon), (3, 5))
+        interpolated = interpolate_variance_forecast(15, 25, 0.5)
+        self.assertAlmostEqual(interpolated ** 2, 0.5 * 15 ** 2 + 0.5 * 25 ** 2, places=10)
+        self.assertFalse(map_horizon(0).ranking_eligible)
+
+    def test_surface_shift_is_positive_and_warns_on_a_floor(self) -> None:
+        shifted = shift_strike_volatility(25, 20, 15, time_years=5 / 365)
+        self.assertEqual(shifted["status"], "pass")
+        self.assertAlmostEqual(float(shifted["volatility"]) ** 2, 25 ** 2 + 15 ** 2 - 20 ** 2, places=8)
+        floored = shift_strike_volatility(10, 50, 5, time_years=1 / 365, method="variance_shift")
+        self.assertGreater(float(floored["volatility"]), 0)
+        self.assertEqual(floored["status"], "warning")
+
+    def test_data_quality_rejects_stale_and_locked_quotes(self) -> None:
+        now = pd.Timestamp("2026-08-13T18:00:00Z")
+        base = pd.Series({
+            "bid": 1.0, "market_mid": 1.05, "ask": 1.1, "volume": 100, "open_interest": 500,
+            "quote_timestamp": now, "underlying_timestamp": now, "observation_timestamp": now,
+            "market_session": "regular", "scan_status": "complete",
+        })
+        self.assertEqual(data_quality_diagnostics(base)["data_quality_state"], "fresh_exact")
+        stale = base.copy()
+        stale["quote_timestamp"] = now - pd.Timedelta(minutes=10)
+        self.assertEqual(data_quality_diagnostics(stale)["data_quality_state"], "stale_option_quote")
+        stale_underlying = base.copy()
+        stale_underlying["underlying_timestamp"] = now - pd.Timedelta(minutes=10)
+        stale_underlying_result = data_quality_diagnostics(stale_underlying)
+        self.assertEqual(stale_underlying_result["data_quality_state"], "stale_underlying_quote")
+        self.assertFalse(bool(stale_underlying_result["data_quality_pass"]))
+        locked = base.copy()
+        locked["ask"] = 1.0
+        self.assertEqual(data_quality_diagnostics(locked)["data_quality_state"], "invalid_bid_ask")
+        zero_bid = base.copy()
+        zero_bid["bid"] = 0.0
+        self.assertEqual(data_quality_diagnostics(zero_bid)["data_quality_state"], "invalid_bid_ask")
 
 
 class PricingAndRankingTests(unittest.TestCase):

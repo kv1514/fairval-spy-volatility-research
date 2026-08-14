@@ -417,7 +417,7 @@
       try {
         const price = modelPrice(pricingModel, { ...clean, volatility });
         return Number.isFinite(price) ? price : null;
-      } catch (error) {
+      } catch {
         return null;
       }
     };
@@ -523,6 +523,12 @@
       ticker, marketMid, marketIv, forecastVolatility, treeSteps = 400,
       treeTolerance = 0.0025, treeMinSteps = 50,
       optionStyle = null, instrumentType = null, calculateIv = false,
+      marketBid = null, marketAsk = null,
+      premiumAbsoluteThreshold = 0.01,
+      premiumSpreadFraction = 0.10,
+      premiumPriceFraction = 0.005,
+      treeAgreementAbsolute = 0.02,
+      treeAgreementPriceFraction = 0.005,
     } = input;
     const style = resolveStyle(ticker, optionStyle, instrumentType, input.styleMap || {});
     const marketInput = { ...input, volatility: marketIv, exerciseStyle: style.style };
@@ -541,7 +547,7 @@
     let americanGreeks = null;
     let modelUsed = "black_scholes_dividend_adjusted";
     let modelReason = style.style === "european"
-      ? "European-style index option"
+      ? "European index option: using dividend-adjusted Black-Scholes."
       : "Black-Scholes selected because American early-exercise premium was negligible";
     let selectedFairValue = bsForecast.price;
     let earlyExercisePremium = 0;
@@ -552,6 +558,15 @@
     let treeConvergenceError = null;
     let treeConvergenceStatus = "not_applicable";
     let treeHistory = [];
+    const quotedSpread = Number.isFinite(Number(marketBid)) && Number.isFinite(Number(marketAsk)) && Number(marketAsk) > Number(marketBid)
+      ? Number(marketAsk) - Number(marketBid)
+      : 0;
+    const premiumThresholdComponents = {
+      absolute: Math.max(Number(premiumAbsoluteThreshold) || 0, 0),
+      spreadAdjusted: Math.max(Number(premiumSpreadFraction) || 0, 0) * quotedSpread,
+      priceRelative: Math.max(Number(premiumPriceFraction) || 0, 0) * Math.max(Math.abs(Number(marketMid) || 0), 0),
+    };
+    const earlyExerciseMaterialityThreshold = Math.max(...Object.values(premiumThresholdComponents));
     if (style.style === "american") {
       try {
         const binForecastResult = adaptiveCrr(forecastInput, {
@@ -594,23 +609,26 @@
           tolerance: 1e-6,
           maxIterations: 60,
         });
-        const poorAgreement = treeDifference > Math.max(0.02, 0.005 * Math.max(binomialForecast, 1));
+        const treeAgreementThreshold = Math.max(
+          Number(treeAgreementAbsolute) || 0,
+          (Number(treeAgreementPriceFraction) || 0) * Math.max(Math.abs(binomialForecast), 1),
+        );
+        const poorAgreement = treeDifference > treeAgreementThreshold;
         if (!treeConverged) {
           warnings.push(`CRR did not converge to $${Number(treeTolerance).toFixed(4)} by ${treeStepsUsed} steps; last error estimate was ${Number.isFinite(treeConvergenceError) ? `$${treeConvergenceError.toFixed(4)}` : "unavailable"}`);
           modelReason = "Black-Scholes fallback because the American tree did not meet its convergence tolerance";
         } else if (poorAgreement) {
           warnings.push(`tree convergence warning: CRR/trinomial differ by $${treeDifference.toFixed(3)}`);
           modelReason = "Black-Scholes fallback because American tree agreement was poor";
-        } else if (sameTreeExercisePremium >= 0.01) {
+        } else if (sameTreeExercisePremium >= earlyExerciseMaterialityThreshold) {
           modelUsed = "binomial_american_crr";
           selectedFairValue = binomialForecast;
-          modelReason = "American CRR selected because same-lattice early-exercise premium was material";
+          modelReason = `American ETF/equity option: CRR selected because the $${sameTreeExercisePremium.toFixed(4)} same-lattice early-exercise premium exceeds the $${earlyExerciseMaterialityThreshold.toFixed(4)} spread/price-adjusted threshold.`;
           warnings.push("early exercise premium is material");
+        } else {
+          modelReason = `American ETF/equity option: Black-Scholes retained because the $${sameTreeExercisePremium.toFixed(4)} same-lattice early-exercise premium is below the $${earlyExerciseMaterialityThreshold.toFixed(4)} spread/price-adjusted threshold.`;
         }
-        if (calculateIv && modelUsed === "binomial_american_crr" && !americanIv.converged) {
-          modelUsed = "black_scholes_dividend_adjusted";
-          selectedFairValue = bsForecast.price;
-          modelReason = "Black-Scholes fallback because American IV solver failed";
+        if (calculateIv && !americanIv.converged) {
           warnings.push(`American IV solver failed: ${americanIv.reason || americanIv.status}`);
         }
       } catch (error) {
@@ -644,9 +662,23 @@
       treeConverged,
       treeConvergenceStatus,
       treeHistory,
+      treeAgreementThreshold: style.style === "american"
+        ? Math.max(Number(treeAgreementAbsolute) || 0, (Number(treeAgreementPriceFraction) || 0) * Math.max(Math.abs(binomialForecast || 0), 1))
+        : null,
+      earlyExerciseMaterialityThreshold,
+      premiumThresholdComponents,
       blackScholesIv: bsIv.volatility,
       americanIv: americanIv.volatility,
+      selectedModelIv: modelUsed === "binomial_american_crr" ? americanIv.volatility : bsIv.volatility,
+      blackScholesIvStatus: bsIv.status,
+      blackScholesIvIterations: bsIv.iterations ?? 0,
+      blackScholesIvWarning: bsIv.reason || null,
+      americanIvStatus: americanIv.status,
+      americanIvIterations: americanIv.iterations ?? 0,
+      americanIvWarning: americanIv.reason || null,
       ivSolverStatus: modelUsed === "binomial_american_crr" ? americanIv.status : bsIv.status,
+      ivSolverIterations: modelUsed === "binomial_american_crr" ? (americanIv.iterations ?? 0) : (bsIv.iterations ?? 0),
+      ivSolverWarning: modelUsed === "binomial_american_crr" ? (americanIv.reason || null) : (bsIv.reason || null),
       modelUsed,
       modelReason,
       pricingWarning: [...new Set(warnings)].join("; "),

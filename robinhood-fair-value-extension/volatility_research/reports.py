@@ -335,6 +335,12 @@ def write_pricing_diagnostics_report(
             "trinomialRuntimeMs": safe(getattr(row, "trinomial_runtime_ms", None)),
             "approximationRuntimeMs": safe(getattr(row, "approximation_runtime_ms", None)),
             "forecastModel": str(row.forecast_model_used),
+            "forecastAtmVol": safe(getattr(row, "forecast_atm_vol", None)),
+            "tradingDte": safe(getattr(row, "trading_dte", None)),
+            "forecastHorizonUsed": str(getattr(row, "forecast_horizon_used", "unavailable")),
+            "forecastHorizonMethod": str(getattr(row, "forecast_horizon_method", "unavailable")),
+            "forecastHorizonWarning": str(getattr(row, "forecast_horizon_warning", "") or ""),
+            "forecastStale": bool(getattr(row, "forecast_stale", True)),
             "forwardPrice": safe(getattr(row, "forward_price", None)),
             "logForwardMoneyness": safe(getattr(row, "log_moneyness", None)),
             "sviStatus": str(getattr(row, "svi_status", "not_fitted")),
@@ -344,6 +350,22 @@ def write_pricing_diagnostics_report(
             "sviButterflyFree": bool(getattr(row, "svi_butterfly_arbitrage_free", False)),
             "sviCalendarFree": bool(getattr(row, "svi_calendar_arbitrage_free", True)),
             "sviMinButterflyG": safe(getattr(row, "svi_minimum_butterfly_g", None)),
+            "skewAdjustmentMethod": str(getattr(row, "skew_adjustment_method", "unavailable")),
+            "surfaceSanityStatus": str(getattr(row, "surface_sanity_status", "unavailable")),
+            "surfaceShiftWarning": str(getattr(row, "surface_shift_warning", "") or ""),
+            "candidateClassification": str(getattr(row, "candidate_classification", "no_signal")),
+            "candidateReason": str(getattr(row, "candidate_reason", "")),
+            "dataQualityState": str(getattr(row, "data_quality_state", "unavailable")),
+            "dataQualityScore": safe(getattr(row, "data_quality_score", None)),
+            "dataQualityPass": bool(getattr(row, "data_quality_pass", False)),
+            "scoreComponents": getattr(row, "score_components", None),
+            "confidenceComponents": getattr(row, "model_confidence_components", None),
+            "rateSource": str(getattr(row, "rate_source", "unavailable")),
+            "rateWarning": str(getattr(row, "rate_warning", "") or ""),
+            "dividendMethod": str(getattr(row, "dividend_method", "unavailable")),
+            "dividendWarning": str(getattr(row, "dividend_warning", "") or ""),
+            "eventWarning": str(getattr(row, "event_warning", "") or ""),
+            "jumpRiskWarning": str(getattr(row, "jump_risk_warning", "") or ""),
             "pricingWarning": str(row.pricing_warning or ""),
             "dataQualityWarning": str(row.data_quality_warning or ""),
             "binomialConvergence": binomial_convergence,
@@ -386,8 +408,8 @@ const money=v=>v==null?"—":new Intl.NumberFormat("en-US",{{style:"currency",cu
 function table(headers,rows){{return `<table><thead><tr>${{headers.map(x=>`<th>${{esc(x)}}</th>`).join("")}}</tr></thead><tbody>${{rows.map(row=>`<tr>${{row.map(x=>`<td>${{x}}</td>`).join("")}}</tr>`).join("")}}</tbody></table>`}}
 function convergence(rows){{return table(["Steps","Price","Δ previous","Runtime ms","Stable"],(rows||[]).map(x=>[x.steps,money(x.price),x.difference_from_previous==null?"—":num(x.difference_from_previous,5),num(x.runtime_ms,2),x.stabilized?"Yes":"No"]))}}
 function render(index){{const c=contracts[index];if(!c)return;document.getElementById("selectedValue").textContent=money(c.selectedFairValue);document.getElementById("modelUsed").textContent=c.modelUsed;document.getElementById("modelReason").textContent=c.modelReason;
-document.getElementById("metrics").innerHTML=[["Market midpoint",money(c.mid),`Bid ${{money(c.bid)}} / Ask ${{money(c.ask)}}`],["Forecast volatility",`${{num(c.forecastVolatility,2)}}%`,`Market IV ${{num(c.marketIv,2)}}%`],["Adaptive CRR",c.treeConvergenceStatus,`N=${{c.treeStepsUsed??"—"}} · error ${{money(c.treeConvergenceError)}} / tol ${{money(c.treeConvergenceTolerance)}}`],["SVI surface",c.sviStatus,`fit ${{num(c.sviFittedIv,2)}}% · residual ${{num(c.sviResidualIv,2)}}pt · butterfly ${{c.sviButterflyFree?"pass":"fail"}} · calendar ${{c.sviCalendarFree?"pass":"fail"}}`]].map(x=>`<div class="metric"><span>${{x[0]}}</span><strong>${{x[1]}}</strong><small>${{x[2]}}</small></div>`).join("");
-const warning=[c.pricingWarning,c.dataQualityWarning].filter(Boolean).join(" · ");const warningNode=document.getElementById("warning");warningNode.textContent=warning||"No pricing or data-quality warning for this snapshot.";warningNode.className=warning?"warning":"warning ok";
+document.getElementById("metrics").innerHTML=[["Market midpoint",money(c.mid),`Bid ${{money(c.bid)}} / Ask ${{money(c.ask)}}`],["RV-SCN volatility",`${{num(c.forecastVolatility,2)}}%`,`ATM forecast ${{num(c.forecastAtmVol,2)}}% · MKT-Q IV ${{num(c.marketIv,2)}}%`],["Horizon mapping",c.forecastHorizonMethod,`${{c.tradingDte??"—"}} trading DTE · ${{c.forecastHorizonUsed}}`],["Data / confidence",`${{c.dataQualityState}} · ${{num(c.modelConfidence,2)}}`,`data score ${{num(c.dataQualityScore,2)}} · ${{c.candidateClassification}}`],["Adaptive CRR",c.treeConvergenceStatus,`N=${{c.treeStepsUsed??"—"}} · error ${{money(c.treeConvergenceError)}} / tol ${{money(c.treeConvergenceTolerance)}}`],["SVI / skew",c.sviStatus,`${{c.skewAdjustmentMethod}} · ${{c.surfaceSanityStatus}} · butterfly ${{c.sviButterflyFree?"pass":"fail"}}`]].map(x=>`<div class="metric"><span>${{x[0]}}</span><strong>${{x[1]}}</strong><small>${{x[2]}}</small></div>`).join("");
+const warning=[c.pricingWarning,c.dataQualityWarning,c.forecastHorizonWarning,c.surfaceShiftWarning,c.rateWarning,c.dividendWarning,c.eventWarning,c.jumpRiskWarning].filter(Boolean).join(" · ");const warningNode=document.getElementById("warning");warningNode.textContent=warning||"No additional warning for this snapshot; RV-SCN remains conditional, not arbitrage fair value.";warningNode.className=warning?"warning":"warning ok";
 document.getElementById("priceTable").innerHTML=table(["Model","Market IV value","Forecast-vol value","Midpoint edge","IV from midpoint","Runtime ms"],[["Black–Scholes",money(c.bsMarket),money(c.bsForecast),money(c.priceEdgeBs),`${{num(c.blackScholesIv,2)}}%`,num(c.blackScholesRuntimeMs,3)],["American CRR",money(c.binomialMarket),money(c.binomialForecast),money(c.priceEdgeAmerican),`${{num(c.americanIv,2)}}%`,num(c.binomialRuntimeMs,3)],["American trinomial","—",money(c.trinomialForecast),"—","—",num(c.trinomialRuntimeMs,3)],["BAW approximation","—",money(c.approximationForecast),"—","—",num(c.approximationRuntimeMs,3)]]);
 document.getElementById("binomialTable").innerHTML=convergence(c.binomialConvergence);document.getElementById("trinomialTable").innerHTML=convergence(c.trinomialConvergence)}}
 if(!contracts.length){{empty.hidden=false;select.disabled=true}}else{{contracts.forEach((c,i)=>select.add(new Option(c.label,i)));report.hidden=false;render(0);select.addEventListener("change",()=>render(Number(select.value)))}}

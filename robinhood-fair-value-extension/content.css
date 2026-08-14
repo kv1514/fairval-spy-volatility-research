@@ -55,6 +55,15 @@
 #bsfv-strategy-list { display: grid; gap: 6px; margin: 8px 0 0; padding-left: 18px; color: #203845; font: 8px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
 #bsfv-strategy-list:empty { display: none; }
 #bsfv-strategy-note { margin: 7px 0 0; color: #70828c; font-size: 8px; line-height: 1.4; }
+#bsfv-contract-diagnostics { max-height: 360px; margin-top: 10px; padding: 9px; overflow: auto; border: 1px solid #d2b46d; border-radius: 6px; background: #fffaf0; }
+#bsfv-contract-diagnostics > div:first-child { display: flex; align-items: center; justify-content: space-between; color: #5a491f; font: 800 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; }
+#bsfv-close-diagnostics { width: 22px; height: 22px; padding: 0; border: 1px solid #cbb56f; border-radius: 4px; background: transparent; color: #5a491f; cursor: pointer; }
+#bsfv-diagnostic-content h4 { margin: 11px 0 5px; color: #394650; font-size: 9px; }
+.bsfv-diagnostic-grid { display: grid; gap: 3px; }
+.bsfv-diagnostic-grid > div { display: grid; grid-template-columns: 42% 58%; gap: 6px; padding: 3px 0; border-bottom: 1px dotted #ddd6c2; font: 8px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.bsfv-diagnostic-grid span { color: #778087; }
+.bsfv-diagnostic-grid b { overflow-wrap: anywhere; color: #21313b; font-weight: 700; }
+.bsfv-diagnostic-warning { margin: 4px 0 0; color: #8a4d10; font-size: 8px; line-height: 1.45; }
 .bsfv-disclaimer { margin: 9px 0 0; color: #879097; font-size: 8px; text-transform: uppercase; letter-spacing: .04em; }
 #bsfv-panel.is-collapsed { width: 226px; }
 #bsfv-panel.is-disabled .bsfv-live-dot { background: #9aa3a8; box-shadow: none; }
@@ -68,17 +77,19 @@
   height: 20px;
   margin-left: 7px;
   padding: 0 6px;
-  border: 1px solid #a9dcb0;
+  border: 1px solid #c8ced2;
   border-radius: 999px;
-  background: #eefaf0;
-  color: #087610;
+  background: #f3f5f6;
+  color: #59656d;
   font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: nowrap;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: pointer;
   vertical-align: middle;
 }
-[data-bsfv-overlay][data-signal="below"] { border-color: #efb6af; background: #fff1ef; color: #b52a1e; }
-[data-bsfv-overlay][data-signal="flat"] { border-color: #c8ced2; background: #f3f5f6; color: #59656d; }
+[data-bsfv-overlay][data-signal="warning"] { border-color: #e3aa48; background: #fff7df; color: #8a5811; }
+[data-bsfv-overlay][data-signal="neutral"] { border-color: #c8ced2; background: #f3f5f6; color: #59656d; }
+[data-bsfv-overlay][data-signal="clean"] { border-color: #00a904; background: #e8f8eb; color: #087610; }
 [data-bsfv-overlay][data-alert="below-model"] { border-width: 2px; border-color: #00a904; background: #dff9e3; color: #056b0b; box-shadow: 0 0 0 3px rgba(0, 200, 5, .14); }
 [data-bsfv-overlay][data-alert="above-model"] { border-width: 2px; border-color: #e14335; background: #ffe7e3; color: #a52218; box-shadow: 0 0 0 3px rgba(225, 67, 53, .12); }
 
@@ -96,4 +107,7 @@
   #bsfv-alerts > div, #bsfv-alert-list { color: #e5eaed; }
   #bsfv-strategies { border-color: #405969; background: #1b2a33; }
   #bsfv-strategies > div, #bsfv-strategy-list { color: #e5eef3; }
+  #bsfv-contract-diagnostics { border-color: #796733; background: #2d2a20; }
+  #bsfv-contract-diagnostics > div:first-child, #bsfv-close-diagnostics, #bsfv-diagnostic-content h4 { color: #f2dfaa; }
+  .bsfv-diagnostic-grid b { color: #edf2f5; }
 }

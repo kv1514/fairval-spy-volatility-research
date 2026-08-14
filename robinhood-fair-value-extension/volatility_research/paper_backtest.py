@@ -68,12 +68,27 @@ def build_forward_outcomes(
             exit_spot = pd.to_numeric(pd.Series([outcome.get("spot")]), errors="coerce").iloc[0]
             hedge_shares = -position_sign * float(delta) * 100.0 if np.isfinite(delta) else np.nan
             hedge_pnl = hedge_shares * (float(exit_spot) - float(entry_spot)) if np.isfinite(hedge_shares) and np.isfinite(entry_spot) and np.isfinite(exit_spot) else np.nan
+            underlying_move = float(exit_spot) - float(entry_spot) if np.isfinite(entry_spot) and np.isfinite(exit_spot) else np.nan
+            signal_iv = pd.to_numeric(pd.Series([signal.get("marketIv")]), errors="coerce").iloc[0]
+            outcome_iv = pd.to_numeric(pd.Series([outcome.get("marketIv")]), errors="coerce").iloc[0]
+            iv_change = float(outcome_iv - signal_iv) if np.isfinite(signal_iv) and np.isfinite(outcome_iv) else np.nan
             strike = pd.to_numeric(pd.Series([signal.get("strike")]), errors="coerce").iloc[0]
             log_moneyness = abs(np.log(float(strike) / float(entry_spot))) if np.isfinite(strike) and np.isfinite(entry_spot) and strike > 0 and entry_spot > 0 else np.nan
             bid = float(signal["bid"])
             ask = float(signal["ask"])
             mark = pd.to_numeric(pd.Series([signal.get("mark")]), errors="coerce").iloc[0]
             spread_pct = (ask - bid) / float(mark) * 100.0 if np.isfinite(mark) and mark > 0 else np.nan
+            outcome_bid = pd.to_numeric(pd.Series([outcome.get("bid")]), errors="coerce").iloc[0]
+            outcome_ask = pd.to_numeric(pd.Series([outcome.get("ask")]), errors="coerce").iloc[0]
+            spread_change = (float(outcome_ask - outcome_bid) - (ask - bid)) if np.isfinite(outcome_bid) and np.isfinite(outcome_ask) else np.nan
+            elapsed_days = (float(outcome["observedAt"]) - float(signal["observedAt"])) / 86_400_000.0
+            theta = pd.to_numeric(pd.Series([signal.get("marketTheta")]), errors="coerce").iloc[0]
+            theta_decay_estimate = float(theta * elapsed_days * 100.0 * position_sign) if np.isfinite(theta) else np.nan
+            realized_variance_proxy = (
+                float(np.log(float(exit_spot) / float(entry_spot)) ** 2 / elapsed_days * 365.0)
+                if np.isfinite(entry_spot) and np.isfinite(exit_spot) and entry_spot > 0 and exit_spot > 0 and elapsed_days > 0
+                else np.nan
+            )
             row = signal.to_dict()
             row.update({
                 "signalTime": pd.to_datetime(float(signal["observedAt"]), unit="ms", utc=True),
@@ -85,6 +100,11 @@ def build_forward_outcomes(
                 "hedgeShares": hedge_shares,
                 "hedgePnlContract": hedge_pnl,
                 "deltaHedgedPnlContract": option_pnl + hedge_pnl if np.isfinite(hedge_pnl) else np.nan,
+                "underlyingMove": underlying_move,
+                "marketIvChange": iv_change,
+                "spreadChange": spread_change,
+                "thetaDecayEstimate": theta_decay_estimate,
+                "realizedVarianceProxy": realized_variance_proxy,
                 "spreadPct": spread_pct,
                 "logMoneynessAbs": log_moneyness,
                 "logVolume": np.log1p(max(float(signal.get("volume") or 0), 0.0)),
@@ -93,6 +113,128 @@ def build_forward_outcomes(
             })
             rows.append(row)
     return pd.DataFrame(rows).sort_values("signalTime").reset_index(drop=True) if rows else pd.DataFrame()
+
+
+def build_multi_horizon_outcomes(
+    records: Iterable[dict] | pd.DataFrame,
+    horizons: Iterable[int] = (5, 15, 30, 60),
+) -> pd.DataFrame:
+    """Build executable outcomes for standard research horizons without midpoint fills."""
+
+    frames = [build_forward_outcomes(records, horizon_minutes=int(horizon)) for horizon in horizons]
+    available = [frame for frame in frames if not frame.empty]
+    return pd.concat(available, ignore_index=True).sort_values(["signalTime", "horizonMinutes"]).reset_index(drop=True) if available else pd.DataFrame()
+
+
+def outcome_dashboard(outcomes: pd.DataFrame) -> pd.DataFrame:
+    """Transparent outcome slices; no score weights are fitted in this report."""
+
+    if outcomes.empty:
+        return pd.DataFrame(columns=["horizonMinutes", "signalType", "scoreDecile", "observations", "hitRate", "meanPnl", "medianPnl", "p10Pnl"])
+    local = outcomes.copy()
+    local["signalType"] = np.where(local["flagDirection"] == "below-model", "long", "short")
+    score = pd.to_numeric(local.get("modelConfidence", local.get("edgePercent")), errors="coerce")
+    local["scoreDecile"] = 0
+    finite = score.notna()
+    if finite.sum() >= 10:
+        local.loc[finite, "scoreDecile"] = pd.qcut(score[finite].rank(method="first"), 10, labels=False, duplicates="drop") + 1
+    rows = []
+    for keys, group in local.groupby(["horizonMinutes", "signalType", "scoreDecile"], dropna=False):
+        pnl = pd.to_numeric(group["deltaHedgedPnlContract"], errors="coerce").dropna()
+        if pnl.empty:
+            pnl = pd.to_numeric(group["optionPnlContract"], errors="coerce").dropna()
+        rows.append({
+            "horizonMinutes": int(keys[0]), "signalType": str(keys[1]), "scoreDecile": int(keys[2]),
+            "observations": int(len(pnl)), "hitRate": float((pnl > 0).mean()) if len(pnl) else np.nan,
+            "meanPnl": float(pnl.mean()) if len(pnl) else np.nan,
+            "medianPnl": float(pnl.median()) if len(pnl) else np.nan,
+            "p10Pnl": float(pnl.quantile(0.10)) if len(pnl) else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def edge_calibration_dashboard(outcomes: pd.DataFrame) -> pd.DataFrame:
+    """Compare transparent signal/context deciles with executable outcomes."""
+
+    columns = [
+        "horizonMinutes", "signalType", "metric", "bucket", "observations",
+        "metricMin", "metricMax", "hitRate", "meanPnl", "medianPnl", "p10Pnl",
+    ]
+    if outcomes.empty:
+        return pd.DataFrame(columns=columns)
+    local = outcomes.copy()
+    local["signalType"] = np.where(local["flagDirection"] == "below-model", "long", "short")
+    hedged = pd.to_numeric(local.get("deltaHedgedPnlContract"), errors="coerce")
+    option = pd.to_numeric(local.get("optionPnlContract"), errors="coerce")
+    local["evaluationPnl"] = hedged.where(hedged.notna(), option)
+    metric_sources = {
+        "model_edge": ("edgePercent", "priceEdge"),
+        "vol_edge": ("volEdge", "vol_edge"),
+        "iv_percentile": ("ivPercentile", "iv_percentile"),
+        "spread_adjusted_edge": ("edgeToSpreadRatio", "edge_to_spread_ratio"),
+    }
+    rows: list[dict[str, object]] = []
+    for metric, candidates in metric_sources.items():
+        source = next((name for name in candidates if name in local), None)
+        if source is None:
+            continue
+        values = pd.to_numeric(local[source], errors="coerce")
+        eligible = local.loc[values.notna() & local["evaluationPnl"].notna()].copy()
+        if eligible.empty:
+            continue
+        eligible["metricValue"] = values.loc[eligible.index]
+        eligible["bucket"] = 0
+        for _, index in eligible.groupby(["horizonMinutes", "signalType"]).groups.items():
+            group_values = eligible.loc[index, "metricValue"]
+            if len(group_values) >= 10 and group_values.nunique() >= 2:
+                eligible.loc[index, "bucket"] = (
+                    pd.qcut(group_values.rank(method="first"), 10, labels=False, duplicates="drop") + 1
+                ).astype(int)
+        for keys, group in eligible.groupby(["horizonMinutes", "signalType", "bucket"], dropna=False):
+            pnl = group["evaluationPnl"]
+            rows.append({
+                "horizonMinutes": int(keys[0]), "signalType": str(keys[1]), "metric": metric,
+                "bucket": int(keys[2]), "observations": int(len(group)),
+                "metricMin": float(group["metricValue"].min()), "metricMax": float(group["metricValue"].max()),
+                "hitRate": float((pnl > 0).mean()), "meanPnl": float(pnl.mean()),
+                "medianPnl": float(pnl.median()), "p10Pnl": float(pnl.quantile(0.10)),
+            })
+    return pd.DataFrame(rows, columns=columns)
+
+
+def false_positive_dashboard(outcomes: pd.DataFrame) -> pd.DataFrame:
+    """Summarize losing executable signals without relabeling them as trades."""
+
+    columns = [
+        "horizonMinutes", "classification", "observations", "positiveOutcomes",
+        "falsePositives", "falsePositiveRate", "meanFalsePositivePnl",
+        "medianFalsePositivePnl", "p10FalsePositivePnl",
+    ]
+    if outcomes.empty:
+        return pd.DataFrame(columns=columns)
+    local = outcomes.copy()
+    classification = local.get("candidateClassification")
+    if classification is None:
+        classification = pd.Series(np.where(
+            local["flagDirection"] == "below-model", "long_vol_candidate", "short_vol_candidate",
+        ), index=local.index)
+    local["classification"] = classification.fillna("unknown").astype(str)
+    hedged = pd.to_numeric(local.get("deltaHedgedPnlContract"), errors="coerce")
+    option = pd.to_numeric(local.get("optionPnlContract"), errors="coerce")
+    local["evaluationPnl"] = hedged.where(hedged.notna(), option)
+    rows: list[dict[str, object]] = []
+    for keys, group in local.dropna(subset=["evaluationPnl"]).groupby(["horizonMinutes", "classification"]):
+        pnl = group["evaluationPnl"]
+        false_positive = pnl[pnl <= 0]
+        rows.append({
+            "horizonMinutes": int(keys[0]), "classification": str(keys[1]),
+            "observations": int(len(pnl)), "positiveOutcomes": int((pnl > 0).sum()),
+            "falsePositives": int(len(false_positive)), "falsePositiveRate": float((pnl <= 0).mean()),
+            "meanFalsePositivePnl": float(false_positive.mean()) if len(false_positive) else np.nan,
+            "medianFalsePositivePnl": float(false_positive.median()) if len(false_positive) else np.nan,
+            "p10FalsePositivePnl": float(false_positive.quantile(0.10)) if len(false_positive) else np.nan,
+        })
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _fit_ridge(training: pd.DataFrame, target_column: str, ridge_penalty: float) -> dict | None:
@@ -185,11 +327,19 @@ def main() -> None:
     args = parser.parse_args()
     payload = json.loads(Path(args.export).read_text(encoding="utf-8"))
     outcomes = build_forward_outcomes(payload.get("records", []), horizon_minutes=args.horizon_minutes)
+    multi_horizon = build_multi_horizon_outcomes(payload.get("records", []))
+    dashboard = outcome_dashboard(multi_horizon)
+    calibration = edge_calibration_dashboard(multi_horizon)
+    false_positives = false_positive_dashboard(multi_horizon)
     predictions = walk_forward_signal_regression(outcomes, min_train_observations=args.min_train)
     diagnostics = evaluate_signal_regression(predictions)
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     predictions.to_csv(output / "paper_outcomes.csv", index=False)
+    multi_horizon.to_csv(output / "paper_outcomes_multi_horizon.csv", index=False)
+    dashboard.to_csv(output / "paper_outcome_dashboard.csv", index=False)
+    calibration.to_csv(output / "paper_edge_calibration_dashboard.csv", index=False)
+    false_positives.to_csv(output / "paper_false_positive_dashboard.csv", index=False)
     diagnostics.to_csv(output / "paper_regression_diagnostics.csv", index=False)
     print(diagnostics.to_string(index=False))
 

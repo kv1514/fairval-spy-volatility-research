@@ -41,7 +41,10 @@
       mark: Number(quote.mark),
       volume: Number(quote.volume),
       openInterest: Number(quote.openInterest),
+      volumePresent: quote.volume !== null && quote.volume !== undefined && quote.volume !== "",
+      openInterestPresent: quote.openInterest !== null && quote.openInterest !== undefined && quote.openInterest !== "",
       capturedAt: Number(quote.capturedAt),
+      dataQualityPass: contract?.dataQuality?.rankingEligible ?? contract?.dataQualityPass ?? true,
       delta,
       gamma: Number(contract?.gamma ?? marketGreeks.gamma),
       vega: Number(contract?.vega ?? marketGreeks.vega),
@@ -58,7 +61,7 @@
     if (![contract.strike, contract.fairValue, contract.bid, contract.ask, contract.mark].every(finite)) {
       reasons.push("missing executable quote or fair value");
     } else {
-      if (contract.ask < contract.bid || contract.bid < 0) reasons.push("invalid bid/ask");
+      if (contract.ask <= contract.bid || contract.bid <= 0) reasons.push("invalid, zero-bid, or locked bid/ask");
       const spreadPercent = contract.mark > 0
         ? ((contract.ask - contract.bid) / contract.mark) * 100
         : Number.POSITIVE_INFINITY;
@@ -68,9 +71,11 @@
     if (!finite(contract.capturedAt) || Number(config.now) - contract.capturedAt > Number(config.maxQuoteAgeMs)) {
       reasons.push("stale or estimated quote");
     }
-    if (!(contract.volume >= Number(config.minimumVolume) || contract.openInterest >= Number(config.minimumOpenInterest))) {
+    if (!contract.volumePresent && !contract.openInterestPresent) reasons.push("volume/open interest missing");
+    else if (!(contract.volume >= Number(config.minimumVolume) || contract.openInterest >= Number(config.minimumOpenInterest))) {
       reasons.push("insufficient volume/open interest");
     }
+    if (!contract.dataQualityPass) reasons.push("contract data-quality gate failed");
     if (config.requireHistoricalContext && !contract.historyMatched) reasons.push("historical bucket unavailable");
     return { pass: reasons.length === 0, reasons };
   }

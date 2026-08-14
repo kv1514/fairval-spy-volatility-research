@@ -1,13 +1,13 @@
 # FairVal SPY Volatility Research
 
-A local Chrome extension that reads a SPY option chain visible in Robinhood and adds strike-specific volatility-scenario values, model selection, implied-volatility context, and quote-quality-gated research candidates. Pricing still renders on other supported symbols, but version 2.3 intentionally ranks strategies only for SPY.
+A local Chrome extension that reads a SPY option chain visible in Robinhood and adds strike-specific volatility-scenario values, model selection, implied-volatility context, and quote-quality-gated research candidates. Pricing still renders on other supported symbols, but version 2.4 intentionally ranks multi-leg strategies only for SPY.
 
 ## What it does
 
 - Uses Robinhood's visible ticker, underlying share price, expiration, strike, option type, and displayed price.
 - Recalculates as Robinhood's virtualized option chain updates.
 - Reads Robinhood's exact Mark and displayed IV whenever a contract is expanded, and caches them for that chain.
-- Automatically refreshes every rendered contract's exact Mark/IV every 30 seconds by default. The interval is configurable from 15 to 300 seconds, so no repeated refresh click is required.
+- Re-captures every rendered contract's exact Mark/IV from the DOM every 30 seconds by default. The interval is configurable from 15 to 300 seconds. Capture time is not misrepresented as an exchange timestamp.
 - Recalculates the displayed research scenario every second as spot and time change. The independent realized-volatility forecast updates after a completed daily close, not on every quote tick.
 - Uses a clearly starred Ask-implied IV estimate only for rows that have not yet been expanded or scanned.
 - Fits raw SVI to total variance on forward log-moneyness when at least five strikes are available. Robust Huber weights reduce quote-outlier influence, and butterfly-arbitrage diagnostics must pass before live SVI is used. Sparse chains fall back to the prior leave-one-out local smile.
@@ -25,8 +25,8 @@ A local Chrome extension that reads a SPY option chain visible in Robinhood and 
 - Applies early exercise at every American tree node with `max(continuation value, intrinsic value)`. CRR uses adaptive step doubling from 50 steps, adjacent-step smoothing to reduce parity oscillation, a configurable dollar tolerance, and a hard maximum. The selected model exposes actual steps, error estimate, convergence status, and explicit fallback reason.
 - Ranks SPY-only defined-risk verticals and equal-width butterflies using executable prices on every leg. It also exposes outright delta-hedged volatility candidates as paper research only.
 - Rejects structures unless every leg has a fresh exact quote and matched historical context and the modeled edge exceeds both the configured threshold and the complete quoted round-trip spread estimate.
-- Records exact quote snapshots and forward 15/60-minute paper outcomes locally. Long-side candidates are scored ask-to-later-bid; sell-side candidates are scored bid-to-later-ask. Option P&L, the initial-delta SPY hedge, and gross delta-hedged P&L are reported separately. The popup can export or clear this JSON study.
-- Marks a daily forecast older than four calendar days as stale and blocks it from generating flags or strategy candidates. Fair-value output remains visible with the stale warning.
+- Records exact quote snapshots and forward 5/15/30/60-minute plus same-session end-of-day paper outcomes locally. EOD resolves only when a same-contract snapshot at or after 3:55 p.m. New York time exists. Long-side candidates are scored ask-to-later-bid; sell-side candidates are scored bid-to-later-ask. Option P&L, the initial-delta SPY hedge, gross delta-hedged P&L, underlying move, IV change, spread change, theta estimate, and a holding-window realized-variance proxy are kept separately. The popup can export or clear this JSON study.
+- Uses weekday-aware forecast freshness and blocks stale daily forecasts from generating flags or strategy candidates. Scenario output remains visible with the warning.
 - Makes no brokerage-data requests, does not read account credentials, and cannot place orders. Its only external request is the public Treasury curve.
 
 The model resolver treats SPX/SPXW/XSP as European-style and U.S. single-stock/ETF contracts as American-style. When the data source does not explicitly supply style, the badge says the classification was inferred. The timing resolver distinguishes standard SPX AM settlement (09:30 ET), SPXW/XSP PM settlement (16:00 ET), and equity/ETF option close (16:15 ET) from the visible series root.
@@ -39,8 +39,8 @@ The model resolver treats SPX/SPXW/XSP as European-style and U.S. single-stock/E
 4. Select this entire `robinhood-fair-value-extension` folder.
 5. Open a Robinhood classic SPY option chain.
 
-A packaged build is also provided as `fairval-spy-research-extension-2.3.0.zip`, containing
-`manifest.json`, `pricing-core.js`, `strategy-core.js`, `content.js`, `content.css`, `popup.html`, `popup.js`, `popup.css`, and the bundled SPY forecast. To
+A packaged build is also provided as `fairval-spy-research-extension-2.4.0.zip`, containing
+`manifest.json`, `pricing-core.js`, `research-core.js`, `strategy-core.js`, `content.js`, `content.css`, `popup.html`, `popup.js`, `popup.css`, and the bundled SPY forecast. To
 install from it, unzip the archive into a folder and **Load unpacked** that folder (Chrome
 cannot load a `.zip` directly in developer mode).
 
@@ -48,7 +48,7 @@ When updating an already loaded copy, click the extension's **Reload** button on
 
 The floating panel appears at the lower left. Exact Mark/IV scanning starts automatically while a supported chain is open and repeats at the configured interval. **Refresh Mark IV now** remains available for an immediate pass. A scan only clicks strike labels to reveal public contract details; it never clicks Robinhood's green `+` order button.
 
-A small `RV-SCN $x.xx` or `MKT-Q $x.xx · CRR/BS-q/BS-EU · N200✓` badge is added beside each visible Robinhood price. `RV-SCN` means a physical realized-volatility scenario, not a uniquely identified risk-neutral fair value. `MKT-Q` means a market-implied diagnostic. `RH IV 20.35%` is Robinhood's exact displayed Mark IV; `Ask IV 20.5%*` is an estimate. `N200✓` means adaptive CRR converged at 200 base steps; `!` means it reached the maximum and the selection fell back explicitly.
+A small `RV-SCN $x.xx | CRR/BS-q/BS-EU | RH IV | IV EDGE | EXEC | IVP | C | DATA` badge is added beside each visible Robinhood price. `RV-SCN` means a physical realized-volatility scenario, not a uniquely identified risk-neutral fair value. `MKT-Q` means a market-implied diagnostic. `EXEC` is the directional ask- or bid-based edge, `C` is decomposed heuristic confidence, and `DATA` is the quote state. The badge stays neutral unless every executable, direction, data, surface, forecast, and model gate passes. Click it for the full diagnostic panel.
 
 ## Pricing architecture
 
@@ -60,7 +60,7 @@ pricing_model.greeks(inputs) -> greeks
 implied_volatility(midpoint, pricing_model, inputs) -> status + volatility or failure reason
 ```
 
-Implemented models are dividend-free Black–Scholes, continuous/dividend-adjusted Black–Scholes, adaptive European/American CRR, European/American trinomial, and Barone-Adesi/Whaley as a fast American benchmark. Discrete cash dividends are supported in the trees and escrowed-adjustment European baseline; BAW explicitly declines that case. CRR is selected only when the adaptive lattice converges, same-lattice early exercise is material, and the independent trinomial agrees within tolerance. Otherwise FairVal explains the Black–Scholes fallback.
+Implemented models are dividend-free Black–Scholes, continuous/dividend-adjusted Black–Scholes, adaptive European/American CRR, European/American trinomial, and Barone-Adesi/Whaley as a fast American benchmark. Discrete cash dividends are supported in the trees and escrowed-adjustment European baseline; BAW explicitly declines that case. CRR is selected only when the adaptive lattice converges, the independent trinomial agrees, and same-lattice early exercise exceeds `max($0.01, 10% of spread, 0.5% of option price)`. Otherwise FairVal explains the Black–Scholes retention/fallback.
 
 The exact tree early-exercise premium compares American and European values on the same lattice. The scanner's displayed premium compares American value with the analytic dividend-adjusted Black–Scholes baseline and floors tiny negative discretization noise at zero.
 
@@ -86,15 +86,15 @@ The strategy lab ranks research candidates rather than individual buy/sell instr
 
 ## Reading the result
 
-- **Walk-forward forecast JSON** imports the engine's compact `latest_forecasts.json`, chooses the nearest model horizon for the visible DTE, and replaces market ATM volatility with the selected out-of-sample forecast while preserving live strike skew.
+- **Walk-forward forecast JSON** imports `latest_forecasts.json`, converts expiration to trading-day DTE, uses exact 1/2/3/5/10-day forecasts or interpolates annualized variance between adjacent horizons, and replaces market ATM volatility with the selected out-of-sample forecast while preserving live strike skew. Extrapolation is warned; 0DTE cannot produce a high-confidence signal without an intraday model.
 - **Smoothed market smile** is the default relative-value screen. It uses robust forward-moneyness SVI when enough strikes pass static-arbitrage diagnostics, with a leave-one-out local smoother as the sparse-chain fallback. Automatic scanning replaces temporary ask-derived estimates with Robinhood's exact Mark IVs.
-- **Own forecast + market skew** is the independent-volatility workflow. Enter your forecast of future ATM realized volatility. The extension preserves the live strike skew while replacing the market's ATM volatility level with your forecast.
+- **Own forecast + market skew** is the independent-volatility workflow. Enter your forecast of future ATM realized volatility. The extension preserves the live strike shape with a configurable additive-IV, IV-ratio, variance, or total-variance transform; total variance is the default. Nonpositive or extreme strike forecasts are floored/clamped with a warning.
 - **Individual market IV** uses each contract's raw quote-implied IV. With a zero IV shift, the model necessarily reproduces the quote used to infer IV; this mode is diagnostic, not an independent fair value.
 - **Flat own-vol forecast** applies one user-entered volatility to every strike without preserving market skew.
 - **IV EDGE** is fair/model IV minus that contract's market IV. A positive number means the model volatility is higher; a negative number means it is lower.
 - **VAR** is market implied variance minus forecast variance, in annualized decimal-variance basis points. Positive supports the short-vol sign in Haugh's delta-hedged approximation; negative supports the long-vol sign.
 - **IVP** is an approximate historical IV percentile for the matched ticker, call/put, DTE, and moneyness bucket. No match means no strongest research flag.
-- **Fair-IV shift** adds or subtracts volatility points from whichever IV model is selected so you can test your own volatility view.
+- **IV shift** adds or subtracts volatility points from whichever IV model is selected so you can test a sensitivity. It is explicit user input, not learned alpha.
 - **Minimum edge %** controls how far the model must remain beyond the executable ask or bid before a contract is flagged.
 - **Maximum spread %** rejects illiquid quotes whose spread can explain the apparent discrepancy.
 - A positive difference means the model value is above Robinhood's displayed reference price; a negative difference means it is below. It is not a buy or sell recommendation and does not estimate execution probability.
@@ -111,7 +111,7 @@ For scanned rows, the extension compares fair value with Robinhood's exact Mark 
 - SPX: S&P Dow Jones Indices' S&P 500 dividend yield, modeled as a continuous index yield.
 - QQQ: annualized recent QQQ distributions, converted into estimated quarterly cash dividends and applied only when an ex-date falls before expiration.
 
-These are transparent screen-grade approximations, not OPRA/Cboe professional analytics. Professional analytics can use NBBO data, a full interest-rate curve, discrete-dividend forecasts, and contract-reference data unavailable in the DOM. FairVal never invents ex-dividend dates: when a schedule is unavailable it uses a continuous-yield approximation and warns. The extension labels output as potential discrepancies under assumptions rather than trade recommendations.
+These are transparent screen-grade approximations, not OPRA/Cboe professional analytics. Professional analytics can use NBBO data, a full interest-rate curve, discrete-dividend forecasts, and contract-reference data unavailable in the DOM. SPY/QQQ ex-dividend dates and cash amounts are explicitly labeled estimates. When a schedule is unavailable FairVal uses a continuous/carry approximation and warns. The extension labels output as potential discrepancies under assumptions rather than trade recommendations.
 
 ## Model limitations
 
@@ -120,6 +120,10 @@ These are transparent screen-grade approximations, not OPRA/Cboe professional an
 - Barone-Adesi/Whaley is a fast approximation and a benchmark, not the final source of truth.
 - Volatility smile, jumps, earnings, event risk, stale quotes, wide spreads, slippage, and forecast error can dominate a small theoretical premium.
 - A model value is conditional on spot, time, rate, dividend, volatility, style, and quote timestamp. It is not a guaranteed executable price.
+- Robinhood page parsing does not provide a trustworthy exchange timestamp. The extension detects DOM-capture age, session mixing, chain changes, partial scans, exact-versus-estimated IV, invalid/locked quotes, and missing liquidity, but it is not an OPRA NBBO feed.
+- Daily close-to-close forecasts are low-confidence for 1DTE and disabled for high-confidence 0DTE ranking. No minute-bar intraday model is fabricated.
+- CPI/FOMC/jobs/earnings calendars are not bundled. Event availability is marked missing, and the scenario carries an explicit jump-risk warning.
+- Historical bucket and ranking weights are heuristic until a sufficiently large quote-level walk-forward outcome sample validates them.
 
 See [SOURCES.md](SOURCES.md) for the source URLs, as-of dates, embedded fallback curve, and interpretation notes.
 

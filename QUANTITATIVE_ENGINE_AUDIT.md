@@ -6,6 +6,11 @@ Status: architecture audit complete; implementation proceeds in the phases below
 
 ## Implementation status (2026-08-13)
 
+- **Completed in 2.4:** unified live/offline quote-state vocabulary, DOM-capture versus source-timestamp distinction, locked/crossed quote rejection, mixed-session suppression, scan identity/partial-scan diagnostics, and contract-level data quality/confidence.
+- **Completed in 2.4:** trading-day DTE, variance-space interpolation, explicit exact/interpolated/extrapolated/unavailable horizon methods, and high-confidence 0DTE suppression when no intraday model exists.
+- **Completed in 2.4:** configurable additive-IV, ratio, variance, and total-variance strike transforms with live/offline parity and surface sanity warnings.
+- **Completed in 2.4:** spread/price-relative early-exercise materiality, IV-solver observability, directional executable edges, mixed-signal rejection, long/short-separated heuristic ranks, and score/confidence decomposition.
+- **Completed in 2.4:** clicked-contract diagnostics, neutral-by-default badges, 5/15/30/60-minute and same-session EOD executable paper outcomes, outcome attribution fields, jump diagnostic payload, and explicit unavailable event/intraday modules.
 - **Completed:** adaptive adjacent-smoothed CRR in extension JavaScript, website TypeScript, and research Python; convergence tolerance/error/status/history; hard maximum; explicit fallback; stable minute-bucket caching; seeded IV inversion; shared cross-language golden vectors.
 - **Completed:** explicit `RV-SCN` physical-volatility scenario versus `MKT-Q` market-implied diagnostic labeling.
 - **Completed:** estimated discrete SPY/QQQ cash-dividend schedules passed into CRR/trinomial via an escrowed-dividend construction; BAW refuses unsupported discrete-dividend cases.

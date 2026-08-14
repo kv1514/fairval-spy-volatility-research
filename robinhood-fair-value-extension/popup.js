@@ -1,9 +1,10 @@
 const DEFAULTS = {
-  settingsVersion: 9,
+  settingsVersion: 10,
   enabled: true,
   ivSource: "surface",
   volatility: 20,
   ivShift: 0,
+  surfaceShiftMethod: "total_variance_shift",
   autoRate: true,
   rate: 4.3,
   autoDividend: true,
@@ -18,14 +19,16 @@ const DEFAULTS = {
   treeSteps: 400,
   treeTolerance: 0.0025,
 };
-const PAPER_STUDY_VERSION = 4;
+const PAPER_STUDY_VERSION = 5;
 const IV_SOURCES = ["walkforward", "surface", "forecast", "individual", "manual"];
+const SURFACE_METHODS = ["total_variance_shift", "variance_shift", "multiplicative_iv", "additive_iv"];
 
 const fields = {
   enabled: document.getElementById("enabled"),
   ivSource: document.getElementById("ivSource"),
   volatility: document.getElementById("volatility"),
   ivShift: document.getElementById("ivShift"),
+  surfaceShiftMethod: document.getElementById("surfaceShiftMethod"),
   autoRate: document.getElementById("autoRate"),
   rate: document.getElementById("rate"),
   autoDividend: document.getElementById("autoDividend"),
@@ -52,12 +55,14 @@ function showPaperStatus(study) {
   const status = document.getElementById("paperStatus");
   const records = study?.records?.length || 0;
   const outcome = study?.outcomes60m;
+  const horizonCounts = [5, 15, 30, 60].map((minutes) => study?.[`outcomes${minutes}m`]?.count || 0).join("/");
+  const eodCount = study?.outcomesEod?.count || 0;
   const hedgeCopy = outcome?.deltaHedgedCount
     ? ` · gross delta-hedged mean ${outcome.meanDeltaHedgedPnlContract >= 0 ? "+" : ""}$${outcome.meanDeltaHedgedPnlContract.toFixed(2)}/contract`
     : "";
   status.textContent = outcome?.count
-    ? `${records.toLocaleString()} snapshots · ${outcome.count} resolved 60m flags · ${(outcome.winRate * 100).toFixed(1)}% positive · option mean ${outcome.meanPnl >= 0 ? "+" : ""}$${outcome.meanPnl.toFixed(2)}/share${hedgeCopy}`
-    : `${records.toLocaleString()} snapshots · no 60m flag outcomes resolved yet.`;
+    ? `${records.toLocaleString()} snapshots · 5/15/30/60m ${horizonCounts} · EOD ${eodCount} · 60m ${(outcome.winRate * 100).toFixed(1)}% positive · option mean ${outcome.meanPnl >= 0 ? "+" : ""}$${outcome.meanPnl.toFixed(2)}/share${hedgeCopy}`
+    : `${records.toLocaleString()} snapshots · 5/15/30/60m ${horizonCounts} · EOD ${eodCount}.`;
 }
 
 function showForecastStatus(payload) {
@@ -88,6 +93,7 @@ chrome.storage.sync.get(null, (saved) => {
     paperRecording: settings.paperRecording,
     treeSteps: settings.treeSteps,
     treeTolerance: settings.treeTolerance,
+    surfaceShiftMethod: settings.surfaceShiftMethod,
   });
   fields.enabled.checked = settings.enabled;
   fields.ivSource.value = IV_SOURCES.includes(settings.ivSource)
@@ -95,6 +101,8 @@ chrome.storage.sync.get(null, (saved) => {
     : "surface";
   fields.volatility.value = settings.volatility;
   fields.ivShift.value = settings.ivShift;
+  fields.surfaceShiftMethod.value = SURFACE_METHODS.includes(settings.surfaceShiftMethod)
+    ? settings.surfaceShiftMethod : DEFAULTS.surfaceShiftMethod;
   fields.autoRate.checked = settings.autoRate;
   fields.rate.value = settings.rate;
   fields.autoDividend.checked = settings.autoDividend;
@@ -163,6 +171,8 @@ document.getElementById("apply").addEventListener("click", () => {
       : "surface",
     volatility: Math.max(0.01, Number(fields.volatility.value) || DEFAULTS.volatility),
     ivShift: Math.min(Math.max(Number(fields.ivShift.value) || 0, -100), 100),
+    surfaceShiftMethod: SURFACE_METHODS.includes(fields.surfaceShiftMethod.value)
+      ? fields.surfaceShiftMethod.value : DEFAULTS.surfaceShiftMethod,
     autoRate: fields.autoRate.checked,
     rate: Number(fields.rate.value) || 0,
     autoDividend: fields.autoDividend.checked,
@@ -203,6 +213,6 @@ document.getElementById("exportPaper").addEventListener("click", () => {
 
 document.getElementById("clearPaper").addEventListener("click", () => {
   if (!confirm("Clear all locally recorded paper observations?")) return;
-  const empty = { version: PAPER_STUDY_VERSION, records: [], updatedAt: Date.now(), outcomes15m: null, outcomes60m: null };
+  const empty = { version: PAPER_STUDY_VERSION, records: [], updatedAt: Date.now(), outcomes5m: null, outcomes15m: null, outcomes30m: null, outcomes60m: null, outcomesEod: null };
   chrome.storage.local.set({ paperStudyV1: empty }, () => showPaperStatus(empty));
 });

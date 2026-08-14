@@ -232,6 +232,8 @@ export default function Home() {
       inputs,
       optionType,
       marketMid,
+      marketBid: selected.bid,
+      marketAsk: selected.ask,
       marketIv: selected.iv ?? inputs.volatility,
       forecastVolatility: inputs.volatility,
       treeSteps: 400,
@@ -513,6 +515,7 @@ export default function Home() {
               <div><span>BS / FORECAST VOL</span><strong>{money.format(pricingComparison.bsForecastFairValue)}</strong></div>
               <div><span>AMERICAN CRR / FORECAST VOL</span><strong>{pricingComparison.americanForecastFairValue == null ? "N/A" : money.format(pricingComparison.americanForecastFairValue)}</strong></div>
               <div><span>EARLY-EXERCISE PREMIUM</span><strong>{money.format(pricingComparison.earlyExercisePremium)}</strong></div>
+              <div><span>PREMIUM MATERIALITY</span><strong>{money.format(pricingComparison.earlyExerciseMaterialityThreshold)} · spread/price adjusted</strong></div>
               <div><span>ADAPTIVE CRR</span><strong>{pricingComparison.treeConvergenceStatus}{pricingComparison.treeStepsUsed ? ` · N=${pricingComparison.treeStepsUsed}` : ""}</strong></div>
               <div><span>LAST ERROR / TOLERANCE</span><strong>{pricingComparison.treeConvergenceError == null ? "N/A" : `${money.format(pricingComparison.treeConvergenceError)} / ${money.format(pricingComparison.treeConvergenceTolerance)}`}</strong></div>
               <p><strong>{pricingComparison.modelReason}</strong> {pricingComparison.pricingWarning}</p>

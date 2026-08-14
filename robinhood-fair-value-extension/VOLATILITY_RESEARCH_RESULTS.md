@@ -1,4 +1,10 @@
-# Walk-forward variance research results — v2.2.0
+# Walk-forward variance research results — v2.4.0
+
+## August 13, 2026 integrity rerun
+
+The complete SPY pipeline was regenerated with 252 completed targets before tuning, a rolling 756-target maximum, and 21-date rebalancing. The extension payload now includes training/validation counts, candidate leaderboards, rebalancing dates, selected-model stability, parameter provenance, staleness, jump diagnostics, and explicit unavailable intraday/event modules. The five current forecasts remain 11.88%, 11.98%, 12.07%, 12.24%, and 11.04% for 1/2/3/5/10 trading days.
+
+The August 5 option snapshot lacks reliable source timestamps and session metadata. Version 2.4 therefore assigns all 18 SPY rows `data_warning` / `mixed_session_warning`; none receives a live candidate grade. This is an intentional data-integrity result, not a failed model. The snapshot still validates pricing, surface, and schema paths, but cannot be promoted into an executable historical claim.
 
 ## August 12, 2026 SPY forecast upgrade
 
@@ -72,7 +78,7 @@ The example ranking file contains 54 near-the-money Robinhood contracts—nine c
 
 The ranking uses market Mark, bid/ask, volume, open interest, a 3.78% short-rate input, and documented ETF/index yield assumptions. It now compares implied and forecast variance, scales the difference by market-IV dollar gamma and time, and reports price edge normalized by vega. A strongest-tier row requires price/volatility sign agreement, executable spread and liquidity gates, and the proper historical ticker/option-type/DTE/moneyness bucket.
 
-The included SPY replay produced 99 prior observations in each matching 5-DTE ATM call/put bucket. It does not include QQQ or SPX option histories, so their current contracts remain unbenchmarked and cannot enter the strongest tier. Five SPY calls entered the strongest research tier in this point-in-time snapshot; these are candidates for study, not trading recommendations or validated outcomes.
+The included SPY replay produced 99 prior observations in each matching 5-DTE ATM call/put bucket. It does not include a synchronized historical NBBO source. Earlier releases allowed five SPY calls into a strongest research tier; version 2.4 correctly suppresses that claim because the point-in-time snapshot does not carry the source timestamps and session state required by the new execution-grade gate.
 
 ## What this run does and does not prove
 

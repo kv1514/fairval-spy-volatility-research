@@ -1,6 +1,6 @@
 {
   "schema": "volatility_forecast.v1",
-  "generated_at": "2026-08-13T15:41:29.785806+00:00",
+  "generated_at": "2026-08-14T04:54:30.080215+00:00",
   "volatility_unit": "annualized_percent",
   "variance_unit": "annualized_decimal_squared",
   "horizons": [
@@ -29,7 +29,124 @@
         "next_variance": 5.601063234438756e-05,
         "qml_loss": -8.594454787959924,
         "n_train": 756
-      }
+      },
+      "training_rows": 756,
+      "validation_rows": 1092,
+      "minimum_training_rows": 252,
+      "maximum_training_rows": 756,
+      "rebalance_every": 21,
+      "rebalancing_dates": [
+        "2024-09-03",
+        "2024-10-02",
+        "2024-10-31",
+        "2024-12-02",
+        "2025-01-02",
+        "2025-02-04",
+        "2025-03-06",
+        "2025-04-04",
+        "2025-05-06",
+        "2025-06-05",
+        "2025-07-08",
+        "2025-08-06",
+        "2025-09-05",
+        "2025-10-06",
+        "2025-11-04",
+        "2025-12-04",
+        "2026-01-06",
+        "2026-02-05",
+        "2026-03-09",
+        "2026-04-08",
+        "2026-05-07",
+        "2026-06-08",
+        "2026-07-09",
+        "2026-08-07"
+      ],
+      "selected_model_stability_last_12": 1.0,
+      "selected_model_diagnostics": {
+        "mse_variance": 0.004868846187467508,
+        "mae_vol": 6.62312033868975,
+        "rmse_vol": 9.290345605216524,
+        "mean_qlike": 0.6655872955916883,
+        "variance_bias": null,
+        "calibration_intercept": null,
+        "calibration_slope": null
+      },
+      "candidate_model_leaderboard": [
+        {
+          "model": "gjr_garch",
+          "mse_variance": 0.004868846187467508,
+          "mae_vol": 6.62312033868975,
+          "rmse_vol": 9.290345605216524,
+          "mean_qlike": 0.6655872955916883,
+          "variance_bias": null,
+          "observations": 1092
+        },
+        {
+          "model": "adaptive_ensemble",
+          "mse_variance": 0.0050949250467488775,
+          "mae_vol": 6.7091178065719275,
+          "rmse_vol": 9.463742706632104,
+          "mean_qlike": 0.6739981480448733,
+          "variance_bias": null,
+          "observations": 1092
+        },
+        {
+          "model": "simple_ensemble",
+          "mse_variance": 0.005528847584215928,
+          "mae_vol": 6.842075825708096,
+          "rmse_vol": 9.847066965210246,
+          "mean_qlike": 0.7325273628538842,
+          "variance_bias": null,
+          "observations": 1092
+        },
+        {
+          "model": "ewma",
+          "mse_variance": 0.005557912619589893,
+          "mae_vol": 6.827190406638061,
+          "rmse_vol": 9.922388268124227,
+          "mean_qlike": 0.8143405912465734,
+          "variance_bias": null,
+          "observations": 1092
+        },
+        {
+          "model": "garch_11",
+          "mse_variance": 0.005639242458425382,
+          "mae_vol": 7.019282369874865,
+          "rmse_vol": 9.999063158848351,
+          "mean_qlike": 0.7196926725042547,
+          "variance_bias": null,
+          "observations": 1092
+        },
+        {
+          "model": "har_rv",
+          "mse_variance": 0.00565848547328561,
+          "mae_vol": 6.485599562534014,
+          "rmse_vol": 9.67674049157772,
+          "mean_qlike": 0.9626310502224843,
+          "variance_bias": null,
+          "observations": 1092
+        },
+        {
+          "model": "optimized_blend",
+          "mse_variance": 0.00597291157315098,
+          "mae_vol": 7.300274030145879,
+          "rmse_vol": 10.53853625147602,
+          "mean_qlike": 0.7745360233070367,
+          "variance_bias": null,
+          "observations": 1092
+        },
+        {
+          "model": "sparse_blend",
+          "mse_variance": 0.006060444797830097,
+          "mae_vol": 7.38543895335451,
+          "rmse_vol": 10.654124503734737,
+          "mean_qlike": 0.7896349067875794,
+          "variance_bias": null,
+          "observations": 1092
+        }
+      ],
+      "parameter_train_end": "2026-08-07T00:00:00",
+      "stale_at_generation": false
     },
     {
       "ticker": "SPY",
@@ -49,7 +166,124 @@
         "next_variance": 5.601063234438756e-05,
         "qml_loss": -8.594454787959924,
         "n_train": 756
-      }
+      },
+      "training_rows": 756,
+      "validation_rows": 1090,
+      "minimum_training_rows": 252,
+      "maximum_training_rows": 756,
+      "rebalance_every": 21,
+      "rebalancing_dates": [
+        "2024-09-03",
+        "2024-10-02",
+        "2024-10-31",
+        "2024-12-02",
+        "2025-01-02",
+        "2025-02-04",
+        "2025-03-06",
+        "2025-04-04",
+        "2025-05-06",
+        "2025-06-05",
+        "2025-07-08",
+        "2025-08-06",
+        "2025-09-05",
+        "2025-10-06",
+        "2025-11-04",
+        "2025-12-04",
+        "2026-01-06",
+        "2026-02-05",
+        "2026-03-09",
+        "2026-04-08",
+        "2026-05-07",
+        "2026-06-08",
+        "2026-07-09",
+        "2026-08-07"
+      ],
+      "selected_model_stability_last_12": 1.0,
+      "selected_model_diagnostics": {
+        "mse_variance": 0.003411194624264047,
+        "mae_vol": 5.410935720531654,
+        "rmse_vol": 7.97068362316576,
+        "mean_qlike": 0.41004484998541735,
+        "variance_bias": null,
+        "calibration_intercept": null,
+        "calibration_slope": null
+      },
+      "candidate_model_leaderboard": [
+        {
+          "model": "gjr_garch",
+          "mse_variance": 0.003411194624264047,
+          "mae_vol": 5.410935720531654,
+          "rmse_vol": 7.97068362316576,
+          "mean_qlike": 0.41004484998541735,
+          "variance_bias": null,
+          "observations": 1090
+        },
+        {
+          "model": "adaptive_ensemble",
+          "mse_variance": 0.0035900670340335535,
+          "mae_vol": 5.449373613271654,
+          "rmse_vol": 8.131971128780888,
+          "mean_qlike": 0.4216247548163568,
+          "variance_bias": null,
+          "observations": 1090
+        },
+        {
+          "model": "har_rv",
+          "mse_variance": 0.003634090487443493,
+          "mae_vol": 5.291664396421566,
+          "rmse_vol": 8.189993391798964,
+          "mean_qlike": 0.5320510260478511,
+          "variance_bias": null,
+          "observations": 1090
+        },
+        {
+          "model": "simple_ensemble",
+          "mse_variance": 0.003864522523109341,
+          "mae_vol": 5.746285757692619,
+          "rmse_vol": 8.614867267279335,
+          "mean_qlike": 0.47144271374951763,
+          "variance_bias": null,
+          "observations": 1090
+        },
+        {
+          "model": "garch_11",
+          "mse_variance": 0.004000496463357232,
+          "mae_vol": 5.874198068166351,
+          "rmse_vol": 8.706752084492503,
+          "mean_qlike": 0.46417574471299167,
+          "variance_bias": null,
+          "observations": 1090
+        },
+        {
+          "model": "ewma",
+          "mse_variance": 0.004049742579082289,
+          "mae_vol": 5.990540747896626,
+          "rmse_vol": 8.996961993323657,
+          "mean_qlike": 0.5049852936812332,
+          "variance_bias": null,
+          "observations": 1090
+        },
+        {
+          "model": "realized_60",
+          "mse_variance": 0.0043078191016519924,
+          "mae_vol": 6.351268614182365,
+          "rmse_vol": 9.555834126523745,
+          "mean_qlike": 0.5512883576736002,
+          "variance_bias": null,
+          "observations": 1090
+        },
+        {
+          "model": "optimized_blend",
+          "mse_variance": 0.00436498607497743,
+          "mae_vol": 6.164614840632762,
+          "rmse_vol": 9.433439868408476,
+          "mean_qlike": 0.5221239966320727,
+          "variance_bias": null,
+          "observations": 1090
+        }
+      ],
+      "parameter_train_end": "2026-08-07T00:00:00",
+      "stale_at_generation": false
     },
     {
       "ticker": "SPY",
@@ -69,7 +303,124 @@
         "next_variance": 5.601063234438756e-05,
         "qml_loss": -8.594454787959924,
         "n_train": 756
-      }
+      },
+      "training_rows": 756,
+      "validation_rows": 1094,
+      "minimum_training_rows": 252,
+      "maximum_training_rows": 756,
+      "rebalance_every": 21,
+      "rebalancing_dates": [
+        "2024-09-03",
+        "2024-10-02",
+        "2024-10-31",
+        "2024-12-02",
+        "2025-01-02",
+        "2025-02-04",
+        "2025-03-06",
+        "2025-04-04",
+        "2025-05-06",
+        "2025-06-05",
+        "2025-07-08",
+        "2025-08-06",
+        "2025-09-05",
+        "2025-10-06",
+        "2025-11-04",
+        "2025-12-04",
+        "2026-01-06",
+        "2026-02-05",
+        "2026-03-09",
+        "2026-04-08",
+        "2026-05-07",
+        "2026-06-08",
+        "2026-07-09",
+        "2026-08-07"
+      ],
+      "selected_model_stability_last_12": 1.0,
+      "selected_model_diagnostics": {
+        "mse_variance": 0.008708781975466125,
+        "mae_vol": 9.247512844341948,
+        "rmse_vol": 12.262357178861967,
+        "mean_qlike": 1.5493159967382335,
+        "variance_bias": null,
+        "calibration_intercept": null,
+        "calibration_slope": null
+      },
+      "candidate_model_leaderboard": [
+        {
+          "model": "gjr_garch",
+          "mse_variance": 0.008708781975466125,
+          "mae_vol": 9.247512844341948,
+          "rmse_vol": 12.262357178861967,
+          "mean_qlike": 1.5493159967382335,
+          "variance_bias": null,
+          "observations": 1094
+        },
+        {
+          "model": "adaptive_ensemble",
+          "mse_variance": 0.00889778185510904,
+          "mae_vol": 9.29035938982822,
+          "rmse_vol": 12.370429693355849,
+          "mean_qlike": 1.565041876874148,
+          "variance_bias": null,
+          "observations": 1094
+        },
+        {
+          "model": "simple_ensemble",
+          "mse_variance": 0.009139871500277497,
+          "mae_vol": 9.251768813448376,
+          "rmse_vol": 12.460821305535445,
+          "mean_qlike": 1.6104984762599717,
+          "variance_bias": null,
+          "observations": 1094
+        },
+        {
+          "model": "garch_11",
+          "mse_variance": 0.009219974468017362,
+          "mae_vol": 9.511324071087024,
+          "rmse_vol": 12.586849740185102,
+          "mean_qlike": 1.6008584389957887,
+          "variance_bias": null,
+          "observations": 1094
+        },
+        {
+          "model": "ewma",
+          "mse_variance": 0.009262760695390733,
+          "mae_vol": 9.457518965936119,
+          "rmse_vol": 12.766818621572645,
+          "mean_qlike": 1.630814285895233,
+          "variance_bias": null,
+          "observations": 1094
+        },
+        {
+          "model": "optimized_blend",
+          "mse_variance": 0.009572932329451816,
+          "mae_vol": 9.742814777803467,
+          "rmse_vol": 13.138760569598375,
+          "mean_qlike": 1.642794935995006,
+          "variance_bias": null,
+          "observations": 1094
+        },
+        {
+          "model": "sparse_blend",
+          "mse_variance": 0.00961668634725492,
+          "mae_vol": 9.788996021204484,
+          "rmse_vol": 13.217122859130454,
+          "mean_qlike": 1.6509833221623085,
+          "variance_bias": null,
+          "observations": 1094
+        },
+        {
+          "model": "har_rv",
+          "mse_variance": 0.009619067110146404,
+          "mae_vol": 8.350486210404082,
+          "rmse_vol": 12.49127682183923,
+          "mean_qlike": 3.3794283319487146,
+          "variance_bias": null,
+          "observations": 1094
+        }
+      ],
+      "parameter_train_end": "2026-08-07T00:00:00",
+      "stale_at_generation": false
     },
     {
       "ticker": "SPY",
@@ -89,7 +440,124 @@
         "next_variance": 5.601063234438756e-05,
         "qml_loss": -8.594454787959924,
         "n_train": 756
-      }
+      },
+      "training_rows": 756,
+      "validation_rows": 1093,
+      "minimum_training_rows": 252,
+      "maximum_training_rows": 756,
+      "rebalance_every": 21,
+      "rebalancing_dates": [
+        "2024-09-03",
+        "2024-10-02",
+        "2024-10-31",
+        "2024-12-02",
+        "2025-01-02",
+        "2025-02-04",
+        "2025-03-06",
+        "2025-04-04",
+        "2025-05-06",
+        "2025-06-05",
+        "2025-07-08",
+        "2025-08-06",
+        "2025-09-05",
+        "2025-10-06",
+        "2025-11-04",
+        "2025-12-04",
+        "2026-01-06",
+        "2026-02-05",
+        "2026-03-09",
+        "2026-04-08",
+        "2026-05-07",
+        "2026-06-08",
+        "2026-07-09",
+        "2026-08-07"
+      ],
+      "selected_model_stability_last_12": 1.0,
+      "selected_model_diagnostics": {
+        "mse_variance": 0.010514838202653325,
+        "mae_vol": 8.727649445996798,
+        "rmse_vol": 11.840261001655664,
+        "mean_qlike": 1.3358747479499598,
+        "variance_bias": null,
+        "calibration_intercept": null,
+        "calibration_slope": null
+      },
+      "candidate_model_leaderboard": [
+        {
+          "model": "gjr_garch",
+          "mse_variance": 0.010514838202653325,
+          "mae_vol": 8.727649445996798,
+          "rmse_vol": 11.840261001655664,
+          "mean_qlike": 1.3358747479499598,
+          "variance_bias": null,
+          "observations": 1093
+        },
+        {
+          "model": "adaptive_ensemble",
+          "mse_variance": 0.010794218034964833,
+          "mae_vol": 8.747565483185694,
+          "rmse_vol": 11.966898237683674,
+          "mean_qlike": 1.34403854690172,
+          "variance_bias": null,
+          "observations": 1093
+        },
+        {
+          "model": "ewma",
+          "mse_variance": 0.011244087716521295,
+          "mae_vol": 8.803101499667521,
+          "rmse_vol": 12.297938932531823,
+          "mean_qlike": 1.492018957520494,
+          "variance_bias": null,
+          "observations": 1093
+        },
+        {
+          "model": "simple_ensemble",
+          "mse_variance": 0.011266183369683533,
+          "mae_vol": 8.716767912636453,
+          "rmse_vol": 12.187057969132942,
+          "mean_qlike": 1.4103077601483638,
+          "variance_bias": null,
+          "observations": 1093
+        },
+        {
+          "model": "garch_11",
+          "mse_variance": 0.011314550175409077,
+          "mae_vol": 9.006008946564188,
+          "rmse_vol": 12.346559007593594,
+          "mean_qlike": 1.391239998283457,
+          "variance_bias": null,
+          "observations": 1093
+        },
+        {
+          "model": "optimized_blend",
+          "mse_variance": 0.01173780910387879,
+          "mae_vol": 9.158301357194594,
+          "rmse_vol": 12.837088064457653,
+          "mean_qlike": 1.4506439782478981,
+          "variance_bias": null,
+          "observations": 1093
+        },
+        {
+          "model": "sparse_blend",
+          "mse_variance": 0.011741632054046899,
+          "mae_vol": 9.156122224023088,
+          "rmse_vol": 12.833379986852838,
+          "mean_qlike": 1.445705683408523,
+          "variance_bias": null,
+          "observations": 1093
+        },
+        {
+          "model": "har_rv",
+          "mse_variance": 0.011795264226285483,
+          "mae_vol": 7.983379284763536,
+          "rmse_vol": 12.254299388075651,
+          "mean_qlike": 2.6883325764969808,
+          "variance_bias": null,
+          "observations": 1093
+        }
+      ],
+      "parameter_train_end": "2026-08-07T00:00:00",
+      "stale_at_generation": false
     },
     {
       "ticker": "SPY",
@@ -99,7 +567,124 @@
       "model_used": "har_rv",
       "lambda_used": null,
       "weights_used": null,
-      "parameters_used": null
+      "parameters_used": null,
+      "training_rows": 756,
+      "validation_rows": 1085,
+      "minimum_training_rows": 252,
+      "maximum_training_rows": 756,
+      "rebalance_every": 21,
+      "rebalancing_dates": [
+        "2024-09-03",
+        "2024-10-02",
+        "2024-10-31",
+        "2024-12-02",
+        "2025-01-02",
+        "2025-02-04",
+        "2025-03-06",
+        "2025-04-04",
+        "2025-05-06",
+        "2025-06-05",
+        "2025-07-08",
+        "2025-08-06",
+        "2025-09-05",
+        "2025-10-06",
+        "2025-11-04",
+        "2025-12-04",
+        "2026-01-06",
+        "2026-02-05",
+        "2026-03-09",
+        "2026-04-08",
+        "2026-05-07",
+        "2026-06-08",
+        "2026-07-09",
+        "2026-08-07"
+      ],
+      "selected_model_stability_last_12": 1.0,
+      "selected_model_diagnostics": {
+        "mse_variance": 0.0022020066577164736,
+        "mae_vol": 4.626643574326398,
+        "rmse_vol": 7.213459450792251,
+        "mean_qlike": 0.3645784878105302,
+        "variance_bias": null,
+        "calibration_intercept": null,
+        "calibration_slope": null
+      },
+      "candidate_model_leaderboard": [
+        {
+          "model": "gjr_garch",
+          "mse_variance": 0.002154299852501571,
+          "mae_vol": 4.738176792167462,
+          "rmse_vol": 7.140339807809821,
+          "mean_qlike": 0.29720158808131836,
+          "variance_bias": null,
+          "observations": 1085
+        },
+        {
+          "model": "har_rv",
+          "mse_variance": 0.0022020066577164736,
+          "mae_vol": 4.626643574326398,
+          "rmse_vol": 7.213459450792251,
+          "mean_qlike": 0.3645784878105302,
+          "variance_bias": null,
+          "observations": 1085
+        },
+        {
+          "model": "adaptive_ensemble",
+          "mse_variance": 0.002270196830862798,
+          "mae_vol": 4.680476144286128,
+          "rmse_vol": 7.261187168312604,
+          "mean_qlike": 0.31308577166547263,
+          "variance_bias": null,
+          "observations": 1085
+        },
+        {
+          "model": "simple_ensemble",
+          "mse_variance": 0.0024084959564789035,
+          "mae_vol": 5.059996788176499,
+          "rmse_vol": 7.704533644673229,
+          "mean_qlike": 0.343119244569829,
+          "variance_bias": null,
+          "observations": 1085
+        },
+        {
+          "model": "garch_11",
+          "mse_variance": 0.002535882180958216,
+          "mae_vol": 5.193914398848259,
+          "rmse_vol": 7.792397158434616,
+          "mean_qlike": 0.34252919044251573,
+          "variance_bias": null,
+          "observations": 1085
+        },
+        {
+          "model": "ewma",
+          "mse_variance": 0.002612890666867684,
+          "mae_vol": 5.534510400971155,
+          "rmse_vol": 8.370841903056505,
+          "mean_qlike": 0.38405331569772905,
+          "variance_bias": null,
+          "observations": 1085
+        },
+        {
+          "model": "realized_60",
+          "mse_variance": 0.002706513997217715,
+          "mae_vol": 5.601581429569005,
+          "rmse_vol": 8.610680573987374,
+          "mean_qlike": 0.4217312020575139,
+          "variance_bias": null,
+          "observations": 1085
+        },
+        {
+          "model": "optimized_blend",
+          "mse_variance": 0.0028875574006922374,
+          "mae_vol": 5.47293826439158,
+          "rmse_vol": 8.613075587503017,
+          "mean_qlike": 0.39321388265799856,
+          "variance_bias": null,
+          "observations": 1085
+        }
+      ],
+      "parameter_train_end": "2026-08-07T00:00:00",
+      "stale_at_generation": false
     }
   ],
   "surface_benchmarks": [
@@ -199,5 +784,38 @@
       "p75": 17.0075699136639,
       "p90": 18.920065573930742
     }
-  ]
+  ],
+  "forecast_configuration": {
+    "min_train_observations": 252,
+    "training_window": 756,
+    "rebalance_every": 21,
+    "horizons": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "jump_diagnostics": [
+    {
+      "ticker": "SPY",
+      "method": "absolute return >= 3 rolling-standard-deviations",
+      "observations": 756,
+      "reference_scale": 0.00809198374697305,
+      "jump_threshold": 0.02427595124091915,
+      "jump_count": 13,
+      "jump_frequency": 0.017195767195767195,
+      "mean_absolute_jump": 0.038987224100004166,
+      "warning": "Historical jump statistic is diagnostic; scheduled event risk is not modeled."
+    }
+  ],
+  "event_calendar": {
+    "status": "unavailable",
+    "warning": "No CPI/FOMC/jobs/earnings calendar is bundled; event risk is not inferred."
+  },
+  "intraday_model": {
+    "status": "unavailable",
+    "warning": "Daily close-to-close forecasts cannot support high-confidence 0DTE ranking."
+  }
 }

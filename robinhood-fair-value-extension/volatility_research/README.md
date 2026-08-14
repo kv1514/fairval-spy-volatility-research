@@ -44,7 +44,7 @@ The Chrome popup exports locally recorded signal-time and later bid/ask snapshot
 python -m volatility_research.paper_backtest fair-value-paper-study-YYYY-MM-DD.json --output-dir paper-backtest-output
 ```
 
-`paper_outcomes.csv` crosses the ask/bid on entry and the opposite executable side on exit and separately reports option, stock-hedge, and gross delta-hedged P&L. A ridge regression creates a walk-forward **reliability score** only after at least 100 earlier outcomes have resolved. An outcome may train a signal only when its exit timestamp is strictly earlier than the signal. The score never replaces forecast volatility or fair value; it is a conditional residual diagnostic that must earn out-of-sample support.
+`paper_outcomes.csv` crosses the ask/bid on entry and the opposite executable side on exit and separately reports option, stock-hedge, and gross delta-hedged P&L. Multi-horizon output covers 5/15/30/60 minutes; the extension export additionally carries same-session EOD outcomes when a closing snapshot exists. Dashboards report score-decile performance, model-edge/vol-edge/IV-percentile/spread-adjusted calibration, and false-positive loss summaries. A ridge regression creates a walk-forward **reliability score** only after at least 100 earlier outcomes have resolved. An outcome may train a signal only when its exit timestamp is strictly earlier than the signal. The score never replaces forecast volatility or fair value; it is a conditional residual diagnostic that must earn out-of-sample support.
 
 ### Refresh the daily SPY forecast
 
@@ -77,7 +77,7 @@ American nodes use `max(discounted risk-neutral continuation, intrinsic)`. Europ
 
 Contract style is configurable. Explicit broker style wins. The default map identifies SPX/SPXW/XSP as European indexes and SPY/QQQ/IWM as American ETFs. A supplied `equity`, `stock`, or `etf` instrument type resolves to American. Every inference is warned; an unresolved contract uses `unknown_style_black_scholes_fallback`.
 
-For American contracts, FairVal calculates CRR and trinomial values under market IV and forecast volatility. CRR becomes the selected model only when the estimated early-exercise premium is material, the tree values agree, and American midpoint IV solves. Negligible premium retains dividend-adjusted Black–Scholes for speed and stability. Solver or convergence failures fall back with an explicit reason.
+For American contracts, FairVal calculates CRR and trinomial values under market IV and forecast volatility. CRR becomes the selected model only when the same-tree early-exercise premium exceeds `max($0.01, 10% of spread, 0.5% of option price)`, the adaptive tree converges, and trinomial agrees. Negligible premium retains dividend-adjusted Black–Scholes for speed and stability. IV inversion is a separate diagnostic and cannot invalidate an otherwise stable scenario price.
 
 `black_scholes_greeks` returns delta, gamma, theta (per calendar day), vega (per one volatility point), and rho (per one rate point). Gamma and vega are identical for a call and a put; delta, theta, and rho depend on the option type. All five greeks are written to `option_rankings.csv`.
 
@@ -110,7 +110,7 @@ Option quotes require:
 ticker,date,expiration,dte,option_type,strike,market_iv,bid,ask,volume,open_interest,spot
 ```
 
-Optional option columns are `market_mid`, `rate`, and `dividend`. `market_iv` may be decimal (`0.20`) or percent (`20`); auto-detection treats a column median at or below `1.5` as decimal, so unusually high decimal-IV datasets should be converted to percent explicitly. Rate and dividend inputs are explicitly percent (`4.25`, not `0.0425`). If `market_mid` is absent, bid/ask midpoint is used.
+Optional option columns are `market_mid`, `rate`, `dividend`, `quote_timestamp`, `underlying_timestamp`, `observation_timestamp`, `market_session`, `scan_status`, rate/dividend provenance, and event metadata. Without synchronized source timestamps the ranker explicitly assigns `dom_parse_warning`, caps confidence, and refuses an A grade. `market_iv` may be decimal (`0.20`) or percent (`20`); auto-detection treats a column median at or below `1.5` as decimal, so unusually high decimal-IV datasets should be converted to percent explicitly. Rate and dividend inputs are explicitly percent (`4.25`, not `0.0425`). If `market_mid` is absent, bid/ask midpoint is used.
 
 Historical surface context uses the same option schema and is supplied with `--surface-history`. `surface.py` constructs forward price from spot, carry, and available cash-dividend PV; fits robust raw SVI to total variance by expiration; records parameters, residuals, outlier weights, butterfly `g(k)`, and calendar-total-variance diagnostics; and retains raw quotes. Percentiles are computed only from dates strictly before the ranked contract, grouped by ticker, option type, DTE bucket, and forward-log-moneyness bucket. Calls and puts are separate so normal downside put skew is not automatically labeled rich volatility.
 
@@ -124,9 +124,9 @@ python -m volatility_research.cli `
   --options data/robinhood-options-snapshot-2026-08-05.csv `
   --surface-history data/spy-option-surface-history-2026.csv `
   --output-dir volatility-research-output `
-  --min-train 30 `
-  --training-window 252 `
-  --rebalance-every 5 `
+  --min-train 252 `
+  --training-window 756 `
+  --rebalance-every 21 `
   --tree-max-steps 400 `
   --tree-tolerance 0.0025
 ```
@@ -135,18 +135,18 @@ Use `--training-window 0` for expanding rather than rolling training. The comman
 
 - `forecasts.csv`: every model/ticker/date/horizon forecast and completed target
 - `evaluation.csv`: MAE, RMSE, variance MSE, and directional accuracy when timestamp-aligned market IV history is supplied
-- `option_rankings.csv`: required contract DataFrame plus executable-edge and liquidity fields
+- `option_rankings.csv`: contract DataFrame with trading-horizon mapping, strike-surface transform, quote-state diagnostics, directional executable edges, confidence decomposition, heuristic score components, rate/dividend/event provenance, and liquidity fields
 - `ewma_lambda_performance.csv`, `blend_weights_history.csv`, and `model_selection_history.csv`
 - `model_diagnostics.csv`: optimized blend, sparse blend, EWMA, HAR-RV, realized-20, and realized-60 variance errors by ticker, horizon, and available moneyness bucket, with exactly one winner marked per group
 - `threshold_study.csv`: forecast-reliability sweep — for each minimum `|forecast_vol - market_iv|` gap it reports observation count, coverage, directional accuracy versus market IV, and variance skill versus simply trusting market IV. It answers "does a bigger gap mean a more reliable signal?" empirically and is a research diagnostic, **not** a buy/sell threshold. It needs a historical market-IV series (`--surface-history`), so it only covers tickers with supplied option history.
-- `latest_forecasts.json`: compact `volatility_forecast.v1` bridge for the Chrome extension
+- `latest_forecasts.json`: `volatility_forecast.v1` bridge with per-record training/validation counts, leaderboard, rebalancing history, model stability, generation freshness, jump diagnostics, and explicit unavailable intraday/event modules
 - `variance_diagnostics_report.html`: standalone diagnostics and current research queue
 - `pricing_diagnostics_report.html`: interactive per-contract inputs, model prices, model IVs, SVI residual/static-arbitrage context, selection reason, warnings, and the actual adaptive CRR convergence path
 - six SVG charts and a local `visualizations/index.html` dashboard
 
 ## Extension bridge
 
-Open the extension popup, import `latest_forecasts.json`, choose **Walk-forward forecast JSON**, and apply. For the visible option DTE, the overlay chooses the nearest forecast horizon. It uses that forecast as the ATM volatility level while retaining the live relative strike skew, then continues refreshing Robinhood Mark/IV values at the configured interval.
+Open the extension popup, import `latest_forecasts.json`, choose **Walk-forward forecast JSON**, and apply. The overlay converts expiration to trading-day DTE, uses an exact 1/2/3/5/10-day horizon or interpolates annualized variance between adjacent horizons, and warns on extrapolation. A same-day contract is diagnostic-only because no intraday model is available. The selected ATM forecast is mapped to each strike with the configured additive-IV, IV-ratio, variance, or total-variance transform; total variance is the default.
 
 The daily forecast is intentionally slower-moving than the live quote. Re-run the Python job after a new official daily close and import the new compact JSON. Live Mark, IV, spread, volume, and open interest continue updating independently on Robinhood.
 
@@ -185,4 +185,10 @@ Black–Scholes values European exercise. American contracts can be exercised be
 
 American IV can differ from Black–Scholes IV because each solver asks a different pricing function to reproduce the same midpoint. The difference is most relevant for deep-ITM puts, dividend-sensitive calls, and short-dated ITM contracts. It is not a separate volatility forecast.
 
-Remaining risks include continuous-yield rather than discrete-dividend modeling, missing ex-dividend calendars, early-exercise uncertainty, approximation and lattice convergence error, volatility-surface dynamics, stale or bad IV data, bid/ask spread, liquidity, slippage, earnings and other event jumps, and realized-volatility forecast error. The scanner describes a potential pricing discrepancy under model assumptions and never a guaranteed mispricing.
+Remaining risks include estimated SPY/QQQ dividends, missing official event calendars, Treasury rather than OIS discount proxies, early-exercise uncertainty, approximation and lattice convergence error, volatility-surface dynamics, unavailable exchange timestamps, Robinhood DOM changes, bid/ask spread, liquidity, slippage, event jumps, no minute-level 0DTE model, physical-to-risk-neutral mapping risk, ranking overfit, and realized-volatility forecast error. The scanner describes a potential pricing discrepancy under model assumptions and never a guaranteed mispricing.
+
+## Data, candidate, and confidence policy
+
+Each contract receives one primary quote state: `fresh_exact`, `fresh_estimated_iv`, `stale_option_quote`, `stale_underlying_quote`, `mixed_session_warning`, `partial_scan`, `invalid_bid_ask`, `missing_liquidity`, or `dom_parse_warning`. Source timestamps, not mere row presence, are required for an execution-grade offline state. A long candidate must have forecast volatility above market IV **and** RV-SCN above the ask by the spread/tick/fee threshold. A short candidate requires the opposite volatility direction and bid above RV-SCN. Disagreement is `mixed_signal` and receives zero directional score.
+
+The ranking score is explicitly heuristic. Long and short candidates are ranked separately; historical percentile influence is shrunk by bucket sample count; data, liquidity, forecast freshness/horizon, model stability, surface quality, rate/dividend quality, and unavailable event coverage enter the confidence decomposition. A low-confidence or timestamp-deficient row cannot receive an A grade. Learning score weights from paper outcomes is permitted only walk-forward after prior outcomes have resolved.

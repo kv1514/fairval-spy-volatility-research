@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "FairVal SPY Volatility Research",
-  "version": "2.3.0",
-  "description": "SPY volatility research with adaptive American pricing, GARCH/HAR forecasts, executable structures, and walk-forward paper diagnostics.",
+  "version": "2.4.0",
+  "description": "Cautious SPY volatility research with quote-state controls, trading-horizon forecasts, surface diagnostics, adaptive pricing, and executable paper outcomes.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://home.treasury.gov/*"],
   "action": {
@@ -12,7 +12,7 @@
   "content_scripts": [
     {
       "matches": ["https://robinhood.com/*"],
-      "js": ["pricing-core.js", "strategy-core.js", "content.js"],
+      "js": ["pricing-core.js", "research-core.js", "strategy-core.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
     }

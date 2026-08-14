@@ -19,6 +19,14 @@
           <option value="manual">Flat own-vol forecast</option>
         </select>
       </label>
+      <label>Strike-skew transform
+        <select id="surfaceShiftMethod">
+          <option value="total_variance_shift">Total-variance shift</option>
+          <option value="variance_shift">Annualized-variance shift</option>
+          <option value="multiplicative_iv">Multiplicative IV ratio</option>
+          <option value="additive_iv">Additive IV shift</option>
+        </select>
+      </label>
       <section class="forecast-import">
         <strong>Walk-forward forecast bridge</strong>
         <label>Import latest_forecasts.json<input id="forecastFile" type="file" accept="application/json,.json"></label>

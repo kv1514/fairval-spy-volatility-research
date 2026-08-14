@@ -29,9 +29,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--options", help="Optional CSV of dated option quotes")
     parser.add_argument("--surface-history", help="Optional historical option IV CSV for DTE/moneyness percentiles")
     parser.add_argument("--output-dir", default="volatility-research-output")
-    parser.add_argument("--min-train", type=int, default=30)
-    parser.add_argument("--training-window", type=int, default=252, help="Completed targets kept in each training window; 0 means expanding")
-    parser.add_argument("--rebalance-every", type=int, default=5)
+    parser.add_argument("--min-train", type=int, default=252)
+    parser.add_argument("--training-window", type=int, default=756, help="Completed targets kept in each training window; 0 means expanding")
+    parser.add_argument("--rebalance-every", type=int, default=21)
     parser.add_argument("--min-volume", type=float, default=10)
     parser.add_argument("--min-open-interest", type=float, default=100)
     parser.add_argument("--tree-max-steps", type=int, default=400, help="Maximum adaptive CRR base steps")
@@ -112,6 +112,10 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
         json.dumps(latest_forecast_payload(
             forecasts,
             surface_history=surface_history if not surface_history.empty else None,
+            diagnostics=diagnostics,
+            model_selection_history=engine.model_selection_history_,
+            price_features=engine.price_features_,
+            config=config,
         ), indent=2),
         encoding="utf-8",
     )

@@ -5,6 +5,7 @@ import vm from "node:vm";
 
 const source = await readFile(new URL("../content.js", import.meta.url), "utf8");
 const pricingSource = await readFile(new URL("../pricing-core.js", import.meta.url), "utf8");
+const researchSource = await readFile(new URL("../research-core.js", import.meta.url), "utf8");
 const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
 const bundledForecast = JSON.parse(await readFile(
   new URL("../volatility-research-output/latest_forecasts.json", import.meta.url),
@@ -27,12 +28,14 @@ const context = vm.createContext({
 });
 context.globalThis = context;
 vm.runInContext(pricingSource, context);
+vm.runInContext(researchSource, context);
 vm.runInContext(source, context);
 const core = context.__BSFV_CORE__;
 const pricing = context.FairValPricing;
+const research = context.FairValResearch;
 
 test("bundles a valid walk-forward forecast bridge for Robinhood", () => {
-  assert.deepEqual(manifest.content_scripts[0].js, ["pricing-core.js", "strategy-core.js", "content.js"]);
+  assert.deepEqual(manifest.content_scripts[0].js, ["pricing-core.js", "research-core.js", "strategy-core.js", "content.js"]);
   const exposedResources = manifest.web_accessible_resources
     ?.flatMap((entry) => entry.resources || []) || [];
   assert.ok(exposedResources.includes("volatility-research-output/latest_forecasts.json"));
@@ -87,6 +90,19 @@ test("model selection uses same-tree exercise premium, not lattice error", () =>
   const deepPut = pricing.compareModels({ ticker: "AAPL", spot: 80, strike: 100, days: 365, volatility: 20, marketIv: 20, forecastVolatility: 20, marketMid: 20.5, rate: 8, dividend: 0, optionType: "put", treeSteps: 150 });
   assert.ok(deepPut.sameTreeExercisePremium > 0.01);
   assert.equal(deepPut.modelUsed, "binomial_american_crr");
+});
+
+test("American materiality threshold is relative to spread and option price", () => {
+  const result = pricing.compareModels({
+    ticker: "SPY", spot: 80, strike: 100, days: 365, marketIv: 20,
+    forecastVolatility: 20, marketMid: 20.5, marketBid: 20, marketAsk: 22,
+    rate: 8, dividend: 0, optionType: "put", treeSteps: 200,
+  });
+  assert.equal(result.earlyExerciseMaterialityThreshold, 0.2);
+  assert.equal(result.premiumThresholdComponents.absolute, 0.01);
+  assert.equal(result.premiumThresholdComponents.spreadAdjusted, 0.2);
+  assert.ok(Math.abs(result.premiumThresholdComponents.priceRelative - 0.1025) < 1e-12);
+  assert.match(result.modelReason, /spread\/price-adjusted threshold/);
 });
 
 test("adaptive CRR step-doubles, smooths lattice oscillation, and reports its error", () => {
@@ -196,7 +212,7 @@ test("computes the full greek set with correct signs and parity", () => {
   assert.ok(Math.abs(g.callDelta - g.putDelta - Math.exp((-1.5 / 100) * T)) < 1e-9);
 });
 
-test("selects the nearest leakage-safe walk-forward horizon", () => {
+test("interpolates leakage-safe walk-forward forecasts in variance space", () => {
   const payload = {
     schema: "volatility_forecast.v1",
     records: [
@@ -206,12 +222,66 @@ test("selects the nearest leakage-safe walk-forward horizon", () => {
     ],
   };
   const selected = core.selectVolatilityForecast(payload, "SPY", 4);
-  assert.equal(selected.horizon, 5);
-  assert.equal(selected.forecastVol, 19);
-  assert.equal(selected.modelUsed, "optimized_blend");
+  assert.equal(selected.horizon, 4);
+  assert.equal(selected.forecastHorizonMethod, "interpolated");
+  assert.equal(selected.forecastHorizonUsed, "1-5D");
+  assert.ok(Math.abs(selected.forecastVol - Math.sqrt(0.25 * 15 ** 2 + 0.75 * 19 ** 2)) < 1e-12);
+  assert.match(selected.modelUsed, /variance interpolation/);
   assert.equal(core.selectVolatilityForecast(payload, "SPXW", 5).ticker, "SPX");
   assert.equal(core.selectVolatilityForecast(payload, "QQQ", 5), null);
-  assert.equal(core.forecastHorizonFromDte(7.2), 7);
+  assert.equal(core.forecastHorizonFromDte(7.2), 7.2);
+});
+
+test("0DTE daily forecasts are diagnostic-only and trading DTE uses weekdays", () => {
+  const sameDay = research.interpolateForecastRecords([{ horizon: 1, forecast_vol: 20 }], 0);
+  assert.equal(sameDay.forecastHorizonMethod, "unavailable");
+  assert.equal(sameDay.rankingEligible, false);
+  const mapped = research.tradingDaysToExpiration("2026-08-17", Date.parse("2026-08-14T20:00:00Z"));
+  assert.equal(mapped.tradingDays, 1);
+  assert.match(mapped.warning, /Holiday/);
+});
+
+test("surface transforms stay positive and total-variance shift preserves variance skew", () => {
+  const shifted = research.shiftStrikeVolatility({
+    marketStrikeVol: 25, marketAtmVol: 20, forecastAtmVol: 15,
+    timeYears: 5 / 365, method: "total_variance_shift",
+  });
+  assert.equal(shifted.status, "pass");
+  assert.ok(shifted.volatility > 0);
+  assert.ok(Math.abs(shifted.volatility ** 2 - (25 ** 2 + 15 ** 2 - 20 ** 2)) < 1e-9);
+  const floored = research.shiftStrikeVolatility({
+    marketStrikeVol: 10, marketAtmVol: 50, forecastAtmVol: 5,
+    timeYears: 1 / 365, method: "variance_shift",
+  });
+  assert.ok(floored.volatility > 0);
+  assert.equal(floored.status, "warning");
+});
+
+test("data quality rejects stale, mixed-session, partial, and locked quotes", () => {
+  const now = Date.parse("2026-08-13T18:00:00Z");
+  const base = { bid: 1, mark: 1.05, ask: 1.1, iv: 20, volume: 100, openInterest: 500, capturedAt: now };
+  const fresh = research.assessDataQuality({ exactQuote: base, displayedPrice: 1.1, now, session: { state: "regular" }, scanState: { status: "complete" } });
+  assert.equal(fresh.state, "fresh_exact");
+  assert.equal(fresh.rankingEligible, true);
+  assert.equal(research.assessDataQuality({ exactQuote: { ...base, capturedAt: now - 300_000 }, displayedPrice: 1.1, now, session: { state: "regular" } }).state, "stale_option_quote");
+  assert.equal(research.assessDataQuality({ exactQuote: base, displayedPrice: 1.1, now, session: { state: "after_hours" } }).state, "mixed_session_warning");
+  assert.equal(research.assessDataQuality({ exactQuote: base, displayedPrice: 1.1, now, session: { state: "regular" }, scanState: { status: "partial" } }).state, "partial_scan");
+  assert.equal(research.assessDataQuality({ exactQuote: { ...base, ask: 1 }, displayedPrice: 1, now, session: { state: "regular" } }).state, "invalid_bid_ask");
+  assert.equal(research.assessDataQuality({ exactQuote: { ...base, bid: 0 }, displayedPrice: 1, now, session: { state: "regular" } }).state, "invalid_bid_ask");
+  const staleUnderlying = research.assessDataQuality({
+    exactQuote: base, displayedPrice: 1.1, now, underlyingCapturedAt: now - 300_000,
+    session: { state: "regular" }, scanState: { status: "complete" },
+  });
+  assert.equal(staleUnderlying.state, "stale_underlying_quote");
+  assert.equal(staleUnderlying.rankingEligible, false);
+});
+
+test("mixed signs never become a clean volatility candidate", () => {
+  const quality = { rankingEligible: true };
+  const edges = research.executableEdges({ modelValue: 0.8, midpoint: 1.05, bid: 1, ask: 1.1 });
+  const mixed = research.classifyResearchSignal({ forecastVol: 25, marketIv: 20, edges, dataQuality: quality });
+  assert.equal(mixed.classification, "mixed_signal");
+  assert.equal(mixed.clean, false);
 });
 
 test("disables research flags when a daily forecast is stale", () => {
@@ -514,6 +584,16 @@ test("only flags executable discrepancies with fresh, liquid, tight quotes", () 
   });
   assert.equal(wide.flagged, false);
 
+  const zeroBid = core.assessDiscrepancy({
+    fairValue: 1.25,
+    referencePrice: 0.55,
+    exactQuote: { ...exactQuote, bid: 0, mark: 0.55, ask: 1.1 },
+    gapThreshold: 10,
+    maxSpreadPercent: 200,
+    now,
+  });
+  assert.equal(zeroBid.flagged, false);
+
   const stale = core.assessDiscrepancy({
     fairValue: 1.25,
     referencePrice: 1,
@@ -564,6 +644,20 @@ test("attributes gross delta-hedged paper PnL separately from option PnL", () =>
   assert.ok(Math.abs(outcome.meanOptionPnlContract - 20) < 1e-12);
   assert.ok(Math.abs(outcome.meanHedgePnlContract + 50) < 1e-12);
   assert.ok(Math.abs(outcome.meanDeltaHedgedPnlContract + 30) < 1e-12);
+});
+
+test("resolves EOD paper outcomes only from same-session closing snapshots", () => {
+  const signal = Date.parse("2026-08-13T18:00:00Z"); // 14:00 New York
+  const close = Date.parse("2026-08-13T19:58:00Z"); // 15:58 New York
+  const records = [
+    { id: "signal", contractKey: "SPY|call|2026-08-14|600", observedAt: signal, bid: 1, ask: 1.05, spot: 600, marketDelta: 0.5, flagDirection: "below-model" },
+    { id: "close", contractKey: "SPY|call|2026-08-14|600", observedAt: close, bid: 1.2, ask: 1.25, spot: 601 },
+    { id: "next", contractKey: "SPY|call|2026-08-14|600", observedAt: Date.parse("2026-08-14T19:59:00Z"), bid: 4, ask: 4.1, spot: 605 },
+  ];
+  const outcome = core.computePaperEndOfDayOutcomes(records);
+  assert.equal(outcome.count, 1);
+  assert.equal(outcome.observations[0].exitTime, close);
+  assert.ok(Math.abs(outcome.meanPnl - 0.15) < 1e-12);
 });
 
 test("thins DOM redraw snapshots without dropping later quote samples", () => {

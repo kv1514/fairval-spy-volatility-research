@@ -1,6 +1,6 @@
 # Model inputs and sources
 
-As of August 5, 2026.
+As of August 13, 2026.
 
 ## Methodology
 
@@ -22,7 +22,9 @@ As of August 5, 2026.
 ## Risk-free rates
 
 - [U.S. Treasury Daily Treasury Par Yield Curve Rates](https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve&field_tdr_date_value=2026)
+- [Treasury Daily Interest Rate XML Feed documentation](https://home.treasury.gov/treasury-daily-interest-rate-xml-feed) documents the feed endpoint and parameters used by the extension.
 - The extension retrieves the public Treasury XML feed when it starts, caches the latest curve locally, and applies a natural cubic spline to the selected expiration.
+- Treasury publishes a **par** curve, not an OIS discount curve. FairVal's continuous-zero conversion is an explicitly labeled proxy, not a professional curve bootstrap.
 - Embedded August 4, 2026 fallback points: 1M 3.78%, 1.5M 3.80%, 2M 3.85%, 3M 3.89%, 4M 3.91%, 6M 4.00%, 1Y 4.04%, and 2Y 4.20%.
 
 ## Dividends
@@ -44,5 +46,12 @@ As of August 5, 2026.
 - Robinhood `get_option_historicals`: fixed hourly trade-price OHLC bars for 264 expired SPY call and put contracts across 12 expirations.
 - Robinhood `get_equity_historicals`: split-adjusted regular-session SPY OHLCV bars aligned to the option timestamps.
 - The returned option history does not contain historical bid/ask or NBBO. The replay therefore uses explicit cost haircuts and is labeled a trade-bar diagnostic, not an executable backtest.
+
+## Market and event calendars
+
+- [NYSE holidays and trading hours](https://www.nyse.com/markets/hours-calendars) is the authoritative integration target for holidays and early closes.
+- [BLS CPI release schedule](https://www.bls.gov/schedule/news_release/cpi.htm) and its published calendar feed are the authoritative CPI-event targets.
+- [Federal Reserve FOMC calendars](https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm) is the authoritative FOMC-event target.
+- Version 2.4 does **not** bundle or silently scrape these calendars. The extension exposes `weekday_only`, `event_data_unavailable`, and short-DTE warnings instead. Candidate confidence is reduced rather than pretending scheduled-event coverage exists.
 
 All outputs are model estimates, not trade recommendations.

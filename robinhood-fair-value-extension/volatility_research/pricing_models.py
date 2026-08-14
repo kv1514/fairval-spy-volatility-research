@@ -845,6 +845,10 @@ def contract_pricing_diagnostics(
     tree_min_steps: int = 50,
     tree_tolerance: float = 0.0025,
     material_premium: float = 0.01,
+    market_bid: float | None = None,
+    market_ask: float | None = None,
+    premium_spread_fraction: float = 0.10,
+    premium_price_fraction: float = 0.005,
     model_disagreement_tolerance: float = 0.02,
 ) -> dict[str, Any]:
     """Return scanner-ready prices, IVs, selection rationale and diagnostics."""
@@ -869,11 +873,13 @@ def contract_pricing_diagnostics(
     binomial_market = trinomial_market = baw_market = math.nan
     binomial_forecast = trinomial_forecast = baw_forecast = math.nan
     american_iv = trinomial_iv = math.nan
+    american_iv_result: IVResult | None = None
+    trinomial_iv_result: IVResult | None = None
     american_greeks: Greeks | None = None
     tree_agreement = math.nan
     selected_model: PricingModel = bs_dividend
     selected_fair_value = bs_forecast
-    model_reason = "European-style contract uses dividend-adjusted Black-Scholes"
+    model_reason = "European index option: using dividend-adjusted Black-Scholes."
     exact_tree_premium = 0.0
     analytic_premium = 0.0
     convergence_status = "not_applicable"
@@ -881,6 +887,19 @@ def contract_pricing_diagnostics(
     tree_convergence_error = math.nan
     tree_history: list[dict[str, Any]] = []
     binomial_runtime_ms = trinomial_runtime_ms = approximation_runtime_ms = math.nan
+    quoted_spread = (
+        float(market_ask) - float(market_bid)
+        if market_bid is not None and market_ask is not None
+        and math.isfinite(float(market_bid)) and math.isfinite(float(market_ask))
+        and float(market_ask) > float(market_bid)
+        else 0.0
+    )
+    premium_threshold_components = {
+        "absolute": max(float(material_premium), 0.0),
+        "spread_adjusted": max(float(premium_spread_fraction), 0.0) * quoted_spread,
+        "price_relative": max(float(premium_price_fraction), 0.0) * max(abs(float(market_mid)), 0.0),
+    }
+    early_exercise_materiality_threshold = max(premium_threshold_components.values())
 
     if style == "american":
         baw = BaroneAdesiWhaleyModel()
@@ -923,16 +942,16 @@ def contract_pricing_diagnostics(
             )
             analytic_premium = max(binomial_forecast - bs_forecast, 0.0)
             american_greeks = crr_market_result.greeks
-            iv_result = implied_volatility(market_mid, crr, replace(market_inputs, exercise_style="american"))
-            american_iv = iv_result.volatility if iv_result.volatility is not None else math.nan
-            if not iv_result.converged:
-                warnings.append(f"American IV solver failed: {iv_result.reason or iv_result.status}")
+            american_iv_result = implied_volatility(market_mid, crr, replace(market_inputs, exercise_style="american"))
+            american_iv = american_iv_result.volatility if american_iv_result.volatility is not None else math.nan
+            if not american_iv_result.converged:
+                warnings.append(f"American IV solver failed: {american_iv_result.reason or american_iv_result.status}")
             trinomial_started = time.perf_counter()
             trinomial_market = tri.price(replace(market_inputs, exercise_style="american"))
             trinomial_forecast = tri.price(replace(forecast_inputs, exercise_style="american"))
             trinomial_runtime_ms = (time.perf_counter() - trinomial_started) * 1000.0
-            tri_iv_result = implied_volatility(market_mid, tri, replace(market_inputs, exercise_style="american"))
-            trinomial_iv = tri_iv_result.volatility if tri_iv_result.volatility is not None else math.nan
+            trinomial_iv_result = implied_volatility(market_mid, tri, replace(market_inputs, exercise_style="american"))
+            trinomial_iv = trinomial_iv_result.volatility if trinomial_iv_result.volatility is not None else math.nan
             tree_agreement = abs(binomial_forecast - trinomial_forecast)
             agreement_limit = max(model_disagreement_tolerance, 0.005 * max(binomial_forecast, 1.0))
             if not adaptive_forecast.converged:
@@ -962,20 +981,23 @@ def contract_pricing_diagnostics(
                 selected_fair_value = bs_forecast
                 model_reason = "Fallback to dividend-adjusted Black-Scholes because American tree agreement was poor"
                 warnings.append("selected model fallback was used")
-            elif exact_tree_premium >= material_premium:
+            elif exact_tree_premium >= early_exercise_materiality_threshold:
                 selected_model = crr
                 selected_fair_value = binomial_forecast
-                model_reason = "American CRR selected because same-lattice early-exercise premium exceeded the materiality threshold"
+                model_reason = (
+                    f"American ETF/equity option: CRR selected because the ${exact_tree_premium:.4f} "
+                    f"same-lattice early-exercise premium exceeds the ${early_exercise_materiality_threshold:.4f} "
+                    "spread/price-adjusted threshold."
+                )
                 warnings.append("early exercise premium is material")
             else:
                 selected_model = bs_dividend
                 selected_fair_value = bs_forecast
-                model_reason = "Black-Scholes selected because American early-exercise premium was negligible"
-            if getattr(selected_model, "exercise_style", "european") == "american" and not iv_result.converged:
-                selected_model = bs_dividend
-                selected_fair_value = bs_forecast
-                model_reason = "Fallback to dividend-adjusted Black-Scholes because American IV solver failed"
-                warnings.append("selected model fallback was used")
+                model_reason = (
+                    f"American ETF/equity option: Black-Scholes retained because the ${exact_tree_premium:.4f} "
+                    f"same-lattice early-exercise premium is below the ${early_exercise_materiality_threshold:.4f} "
+                    "spread/price-adjusted threshold."
+                )
             if inputs.option_type.lower() == "put" and inputs.strike / inputs.spot >= 1.10:
                 warnings.append("deep ITM put; early exercise may be relevant")
             if inputs.dte <= 3 and _intrinsic(inputs) > 0:
@@ -1026,10 +1048,26 @@ def contract_pricing_diagnostics(
         "american_model_iv": american_iv,
         "selected_model_iv": selected_iv,
         "iv_solver_status": "converged" if math.isfinite(selected_iv) else "failed",
+        "iv_solver_iterations": (
+            american_iv_result.iterations
+            if getattr(selected_model, "exercise_style", "european") == "american" and american_iv_result is not None
+            else bs_iv_result.iterations
+        ),
         "iv_solver_warning": None if math.isfinite(selected_iv) else "selected-model IV could not be backsolved from midpoint",
+        "calc_bs_iv": bs_iv_result.volatility if bs_iv_result.volatility is not None else math.nan,
+        "calc_selected_model_iv": selected_iv,
+        "american_iv": american_iv,
+        "black_scholes_iv_solver_status": bs_iv_result.status,
+        "black_scholes_iv_solver_iterations": bs_iv_result.iterations,
+        "black_scholes_iv_solver_warning": bs_iv_result.reason,
+        "american_iv_solver_status": american_iv_result.status if american_iv_result is not None else "not_applicable",
+        "american_iv_solver_iterations": american_iv_result.iterations if american_iv_result is not None else 0,
+        "american_iv_solver_warning": american_iv_result.reason if american_iv_result is not None else None,
         "early_exercise_premium": analytic_premium,
         "tree_early_exercise_premium": exact_tree_premium,
         "tree_model_difference": tree_agreement,
+        "early_exercise_materiality_threshold": early_exercise_materiality_threshold,
+        "early_exercise_threshold_components": premium_threshold_components,
         "tree_convergence_status": convergence_status,
         "tree_convergence_error": tree_convergence_error,
         "tree_convergence_tolerance": tree_tolerance if style == "american" else math.nan,
